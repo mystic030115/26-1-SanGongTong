@@ -302,10 +302,11 @@ export default function ChartsPanel() {
       </div>
 
       <section className="chart-section">
-        <h3>따릉이(가로) vs 대중교통 총시간(세로) · 샘플</h3>
+        <h3>따릉이(가로) vs 대중교통 총시간(세로)</h3>
         <p className="chart-desc">
-          비교 가능한 트립만 표시합니다. 초록=따릉이 더 빠름, 빨강=대중교통이 같거나
-          더 빠름. 점선은 동일 시간(x=y). 툴팁의 「차이」는 대중교통−따릉이(분)입니다.
+          실제 병합 데이터의 <strong>비교 가능 트립</strong>만 씁니다. 점이 많으면 무작위로 최대
+          2,800건만 그립니다(가짜 데이터 아님). 초록=따릉이 더 빠름, 빨강=대중교통이 같거나 더
+          빠름. 점선은 동일 시간(x=y). 툴팁의 「차이」는 대중교통−따릉이(분)입니다.
         </p>
         <div className="chart-box chart-box-tall">
           <ResponsiveContainer width="100%" height={400}>

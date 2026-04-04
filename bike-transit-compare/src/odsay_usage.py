@@ -1,4 +1,9 @@
-"""ODsay HTTP 호출 누적. KST 달력일 기준으로 자정에 카운트를 0으로 리셋."""
+"""ODsay HTTP 호출 누적. KST 달력일 기준으로 자정에 카운트를 0으로 리셋.
+
+`record_odsay_call()`은 `requests.get`이 **응답 객체를 돌려준 뒤**에만 호출된다.
+(연결 실패·타임아웃 등으로 get()이 예외를 내면 적립하지 않음.)
+4xx/5xx도 응답이 온 것이므로 적립된다(실제 ODsay 과금 정책과 다를 수 있음).
+"""
 
 from __future__ import annotations
 
@@ -81,5 +86,5 @@ def get_odsay_usage() -> dict:
 
 
 def record_odsay_call() -> None:
-    """ODsay에 대한 HTTP 요청이 끝난 직후 호출(응답 본문 파싱 전에 호출해도 됨)."""
+    """`requests.get(ODsay URL)`이 Response를 반환한 직후 호출(상태코드 무관, 본문 파싱 전)."""
     _read_write_usage(1)

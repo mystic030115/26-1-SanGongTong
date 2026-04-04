@@ -8,6 +8,12 @@ from typing import Any, Dict, Optional, Tuple
 import pandas as pd
 import requests
 from dotenv import load_dotenv
+from requests.exceptions import (
+    ChunkedEncodingError,
+    HTTPError,
+    JSONDecodeError,
+    RequestException,
+)
 
 from .app_journal import (
     append_jsonl,
@@ -284,7 +290,7 @@ def fetch_transit_time(start_lon, start_lat, end_lon, end_lat):
 
     try:
         resp = requests.get(ODsay_URL, params=params, timeout=20)
-    except requests.RequestException as e:
+    except RequestException as e:
         append_jsonl(
             {
                 "kind": "odsay_http",
@@ -296,14 +302,21 @@ def fetch_transit_time(start_lon, start_lat, end_lon, end_lat):
         )
         raise
 
+    # ODsay 서버가 응답 헤더/본문을 돌려준 뒤에만 1회 적립(연결 실패·DNS 등은 제외).
     try:
         record_odsay_call()
-    except OSError:
-        pass
+    except OSError as e:
+        append_jsonl(
+            {
+                "kind": "odsay_usage_write_failed",
+                "source": "fetch_transit_time",
+                "error": str(e)[:300],
+            }
+        )
 
     try:
         resp.raise_for_status()
-    except requests.HTTPError:
+    except HTTPError:
         append_jsonl(
             {
                 "kind": "odsay_http",
@@ -542,6 +555,12 @@ def build_pair_cache(
                     "end_lat": row["end_lat"],
                 }
             else:
+                err_out = {
+                    "transit_total_min": pd.NA,
+                    "transit_riding_min": pd.NA,
+                    "transit_status": "ERROR",
+                    "api_detail": "",
+                }
                 try:
                     out = fetch_transit_time(
                         row["start_lon"],
@@ -551,15 +570,27 @@ def build_pair_cache(
                     )
                     did_call_api = True
                     api_calls += 1
-                except Exception as e:
-                    out = {
-                        "transit_total_min": pd.NA,
-                        "transit_riding_min": pd.NA,
-                        "transit_status": "ERROR",
-                        "api_detail": str(e)[:500],
-                    }
+                except HTTPError as e:
+                    # record_odsay_call()은 이미 실행됨(응답 수신 후).
                     did_call_api = True
                     api_calls += 1
+                    out = {**err_out, "api_detail": str(e)[:500]}
+                except JSONDecodeError as e:
+                    did_call_api = True
+                    api_calls += 1
+                    out = {**err_out, "api_detail": f"JSON: {str(e)[:480]}"}
+                except ChunkedEncodingError as e:
+                    did_call_api = True
+                    api_calls += 1
+                    out = {**err_out, "api_detail": str(e)[:500]}
+                except RequestException as e:
+                    # get() 단계 실패 등 — 응답 객체 없음, record_odsay_call 미실행.
+                    did_call_api = True
+                    out = {**err_out, "api_detail": str(e)[:500]}
+                except Exception as e:
+                    did_call_api = True
+                    api_calls += 1
+                    out = {**err_out, "api_detail": str(e)[:500]}
                 out["start_station_id"] = row["start_station_id"]
                 out["end_station_id"] = row["end_station_id"]
                 out["start_lon"] = row["start_lon"]

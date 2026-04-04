@@ -66,15 +66,32 @@ function curvePositions(
 
 const EDGE_WEIGHT = 2;
 const EDGE_OPACITY = 0.92;
-const EDGE_HUE = 118;
-const EDGE_LIGHT = 52;
 
-/** 승률은 선 굵기·불투명도와 무관하게 채도만 변화 (낮음=탁한 회녹, 높음=선명한 녹). */
-function edgePathOptions(ratePct: number): L.PolylineOptions {
-  const t = Math.max(0, Math.min(100, ratePct)) / 100;
-  const saturation = 8 + t * 76;
+/**
+ * 임계 승률 탭과 동일 기준: 승률 > threshold → 따릉이 유리(회색, 높을수록 진함),
+ * 이하 → 대중교통 유리 쪽(초록, 승률이 낮을수록 진함).
+ */
+function edgePathOptions(ratePct: number, thresholdPct: number): L.PolylineOptions {
+  const r = Math.max(0, Math.min(100, ratePct));
+  const thr = Math.max(0, Math.min(100, thresholdPct));
+  let color: string;
+
+  if (r > thr) {
+    const span = Math.max(100 - thr, 0.001);
+    const u = Math.max(0, Math.min(1, (r - thr) / span));
+    const L = 58 - u * 24;
+    const S = 6 + u * 16;
+    color = `hsl(218 ${S}% ${L}%)`;
+  } else {
+    const span = Math.max(thr, 0.001);
+    const u = Math.max(0, Math.min(1, (thr - r) / span));
+    const L = 52 - u * 22;
+    const S = 28 + u * 48;
+    color = `hsl(134 ${S}% ${L}%)`;
+  }
+
   return {
-    color: `hsl(${EDGE_HUE} ${saturation}% ${EDGE_LIGHT}%)`,
+    color,
     weight: EDGE_WEIGHT,
     opacity: EDGE_OPACITY,
     lineCap: "round",
@@ -101,7 +118,12 @@ function MapResizeSync() {
   return null;
 }
 
-export default function MapPanel() {
+type MapPanelProps = {
+  /** 임계 승률 탭에서 「적용」한 값과 맞춤(기본 50). */
+  thresholdPct?: number;
+};
+
+export default function MapPanel({ thresholdPct = 50 }: MapPanelProps) {
   const [minComp, setMinComp] = useState(3);
   const [maxEdges, setMaxEdges] = useState(700);
   const [data, setData] = useState<Awaited<
@@ -147,10 +169,11 @@ export default function MapPanel() {
     <div className="map-panel-root">
       <div className="map-toolbar">
         <p className="map-intro">
-          대여소는 점, 출발·도착 쌍은 선으로 연결됩니다. 선은{" "}
-          <strong>비교 가능한 트립 중 따릉이가 더 빠른 비율</strong>이 높을수록
-          선 색 채도만 진해지고, 굵기는 같습니다. 점·선에 마우스를 올리면 이름과
-          승률을 볼 수 있습니다.
+          대여소는 점, 출발·도착 쌍은 선으로 연결됩니다. 임계 승률 탭에서 적용한{" "}
+          <strong>{thresholdPct}%</strong>를 기준으로, 승률이 그보다{" "}
+          <strong>크면 회색</strong>(높을수록 진함 · 따릉이 유리),{" "}
+          <strong>이하이면 초록</strong>(낮을수록 진함 · 대중교통 유리 쪽)입니다.
+          굵기는 같습니다. 점·선에 마우스를 올리면 이름과 승률을 볼 수 있습니다.
         </p>
         <div className="map-controls">
           <label className="map-field">
@@ -215,10 +238,10 @@ export default function MapPanel() {
             if (!a || !b) return null;
             const bend = e.from_id < e.to_id ? 1 : -1;
             const positions = curvePositions(a, b, bend);
-            const opts = edgePathOptions(e.rate_pct);
+            const opts = edgePathOptions(e.rate_pct, thresholdPct);
             return (
               <Polyline
-                key={`${e.from_id}-${e.to_id}-${e.rate_pct}`}
+                key={`${e.from_id}-${e.to_id}-${e.rate_pct}-${thresholdPct}`}
                 positions={positions}
                 pathOptions={opts}
               >
@@ -237,6 +260,11 @@ export default function MapPanel() {
                     <div className="map-tip-rate">
                       따릉이 더 빠른 비율{" "}
                       <strong>{e.rate_pct.toFixed(1)}%</strong>
+                      <span className="map-tip-sub">
+                        {" "}
+                        (임계 {thresholdPct}%{" "}
+                        {e.rate_pct > thresholdPct ? "초과 · 회색" : "이하 · 초록"})
+                      </span>
                     </div>
                     <div className="map-tip-sub mono">
                       비교 가능 {e.comparable}건 / 이 쌍 전체 트립{" "}
@@ -275,11 +303,26 @@ export default function MapPanel() {
         </MapContainer>
       </div>
 
-      <div className="map-legend">
-        <span className="map-legend-label">선 색 채도 (굵기 동일)</span>
-        <div className="map-legend-bar" aria-hidden />
-        <span className="map-legend-lo">낮음 (0%)</span>
-        <span className="map-legend-hi">높음 (100%)</span>
+      <div className="map-legend map-legend-split">
+        <span className="map-legend-label">
+          선 색 · 임계 {thresholdPct}% (임계 승률 탭 「적용」과 동일)
+        </span>
+        <div className="map-legend-bars" aria-hidden>
+          <div
+            className="map-legend-swatch map-legend-swatch-green"
+            title="임계 이하: 승률 낮을수록 진한 초록"
+          />
+          <div
+            className="map-legend-swatch map-legend-swatch-grey"
+            title="임계 초과: 승률 높을수록 진한 회색"
+          />
+        </div>
+        <span className="map-legend-cap map-legend-cap-l">
+          초록 = 임 ≤ {thresholdPct}% · 낮은 승률일수록 진함
+        </span>
+        <span className="map-legend-cap map-legend-cap-r">
+          회색 = 임 &gt; {thresholdPct}% · 높은 승률일수록 진함
+        </span>
       </div>
     </div>
   );

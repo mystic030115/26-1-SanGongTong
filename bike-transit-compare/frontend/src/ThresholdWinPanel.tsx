@@ -45,15 +45,14 @@ const TIP_STYLE = {
   borderRadius: 8,
 };
 
-/** 임계 %가 속한 5%p 구간 [lo, hi) — 백엔드 hist 의 bin_lo/bin_hi 와 동일. */
-function thresholdBinBounds(pct: number): { lo: number; hi: number } {
-  const p = Math.min(100, Math.max(0, pct));
-  if (p >= 100) return { lo: 95, hi: 100 };
-  const lo = Math.floor(p / 5) * 5;
-  return { lo, hi: lo + 5 };
-}
+type ThresholdWinPanelProps = {
+  /** 「적용」 시 지도 등 다른 탭과 동일 임계를 맞출 때 사용 */
+  onAppliedThresholdChange?: (pct: number) => void;
+};
 
-export default function ThresholdWinPanel() {
+export default function ThresholdWinPanel({
+  onAppliedThresholdChange,
+}: ThresholdWinPanelProps) {
   const [inputPct, setInputPct] = useState(50);
   const [appliedPct, setAppliedPct] = useState(50);
   const [data, setData] = useState<OdThresholdSummary | null>(null);
@@ -93,11 +92,45 @@ export default function ThresholdWinPanel() {
     return r;
   }, [data, filterCls, search]);
 
+  const histNumeric = useMemo(() => {
+    const histRows = data?.hist_od_bike_rate ?? [];
+    return histRows.map((e) => ({
+      ...e,
+      binMid:
+        e.bin_lo != null && e.bin_hi != null ? (e.bin_lo + e.bin_hi) / 2 : 0,
+    }));
+  }, [data]);
+
+  /** 막대 색과 동일: 구간 상한(bin_hi) ≤ 임계 → 파랑, 그 외 → 회색. */
+  const histBinColorSummary = useMemo(() => {
+    const rows = data?.hist_od_bike_rate ?? [];
+    const thr = data?.threshold_pct ?? 0;
+    let total = 0;
+    let grey = 0;
+    for (const e of rows) {
+      const c = Number(e.count) || 0;
+      total += c;
+      const hi = e.bin_hi;
+      const isBlue = hi != null && hi <= thr;
+      if (!isBlue) grey += c;
+    }
+    if (total <= 0) {
+      return { total: 0, grey: 0, blue: 0, greyPct: null as number | null };
+    }
+    return {
+      total,
+      grey,
+      blue: total - grey,
+      greyPct: (grey / total) * 100,
+    };
+  }, [data?.hist_od_bike_rate, data?.threshold_pct]);
+
   const apply = () => {
     const v = Math.min(100, Math.max(0, Number(inputPct)));
     if (Number.isNaN(v)) return;
     setInputPct(v);
     setAppliedPct(v);
+    onAppliedThresholdChange?.(v);
   };
 
   if (loading && !data) {
@@ -129,10 +162,6 @@ export default function ThresholdWinPanel() {
   }
 
   const pieData = (data.pie_od_class ?? []).filter((p) => p.value > 0);
-  const histRows = data.hist_od_bike_rate ?? [];
-  const thB = thresholdBinBounds(data.threshold_pct);
-  const thBinName =
-    histRows.find((e) => e.bin_lo === thB.lo && e.bin_hi === thB.hi)?.name ?? "";
 
   return (
     <div className="charts-root threshold-root">
@@ -271,27 +300,43 @@ export default function ThresholdWinPanel() {
 
       <section className="chart-section">
         <h3>따릉이 승률 분포 (출발·도착 쌍 기준, 5%p 구간)</h3>
-        <p className="chart-desc">
-          가로축: 각 출발·도착 쌍의 「비교 가능 트립 중 따릉이가 더 빠른 비율」을{" "}
-          <strong>5%p</strong> 너비 구간(0–5%, 5–10%, …, 95–100%)으로 나눈 것입니다. 세로축: 해당
-          승률 구간에 들어가는 쌍의 개수입니다. 막대는 구간 상한이 적용 임계{" "}
-          <strong>{data.threshold_pct}%</strong> 이하이면{" "}
-          <strong style={{ color: COL.histBelowThr }}>파란색</strong>
-          (임계 왼쪽·대중교통 유리 쪽), 그보다 오른쪽 구간은{" "}
-          <strong style={{ color: COL.histAboveThr }}>회색</strong>(따릉이 유리 쪽)입니다. 세로 점선은
-          임계가 걸린 5%p 구간을 가리킵니다.
-        </p>
+        <div className="chart-desc threshold-hist-copy">
+          <p>
+            <strong>무엇을 세나요.</strong> 비교 가능 트립이 있는 출발·도착 쌍마다, 그 트립들 가운데
+            따릉이가 더 빠른 비율(%)을 구합니다. 그 비율을{" "}
+            <strong>5%p</strong> 폭 구간(0–5%, 5–10%, …, 95–100%)으로 나누고, 구간마다{" "}
+            <strong>쌍이 몇 개</strong>인지 세로 막대로 보여 줍니다.
+          </p>
+          <p>
+            <strong>색과 임계선.</strong> 적용 임계는 <strong>{data.threshold_pct}%</strong>입니다. 각
+            구간의 <strong>오른쪽 끝(상한)</strong>이 이 임계 <strong>이하</strong>이면{" "}
+            <strong style={{ color: COL.histBelowThr }}>파란 막대</strong>, 상한이 임계{" "}
+            <strong>보다 크면</strong>{" "}
+            <strong style={{ color: COL.histAboveThr }}>회색 막대</strong>입니다. (위쪽에서 정한
+            「임계 초과 시 따릉이 유리」와 같은 방향으로, 승률이 높은 쪽을 회색으로
+            묶었습니다.) 세로 점선은 임계가 0–100% 축에서 어느 지점인지 표시합니다.
+          </p>
+          {histBinColorSummary.total > 0 && histBinColorSummary.greyPct != null ? (
+            <p className="threshold-hist-stat">
+              <strong>회색 막대 구간에만 해당하는 쌍</strong>은 전체{" "}
+              <span className="mono">{histBinColorSummary.total.toLocaleString()}</span>개 중{" "}
+              <span className="mono">{histBinColorSummary.grey.toLocaleString()}</span>개(
+              <strong>{histBinColorSummary.greyPct.toFixed(1)}%</strong>). 나머지{" "}
+              <span className="mono">{histBinColorSummary.blue.toLocaleString()}</span>개는 파란 구간에
+              속합니다.
+            </p>
+          ) : null}
+        </div>
         <div className="chart-box chart-box-tall">
           <ResponsiveContainer width="100%" height={360}>
-            <BarChart data={histRows} margin={{ top: 28, right: 12, bottom: 8, left: 4 }}>
+            <BarChart data={histNumeric} margin={{ top: 28, right: 12, bottom: 8, left: 4 }}>
               <CartesianGrid strokeDasharray="3 3" stroke={COL.grid} />
               <XAxis
-                dataKey="name"
-                tick={{ fill: COL.text, fontSize: 9 }}
-                angle={-38}
-                textAnchor="end"
-                height={78}
-                interval={0}
+                type="number"
+                dataKey="binMid"
+                domain={[0, 100]}
+                ticks={[0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]}
+                tick={{ fill: COL.text, fontSize: 10 }}
                 label={{
                   value: "따릉이 승률 (%)",
                   position: "insideBottom",
@@ -314,11 +359,14 @@ export default function ThresholdWinPanel() {
               <Tooltip
                 contentStyle={TIP_STYLE}
                 formatter={(value: number) => [`${value}개`, "구간"]}
-                labelFormatter={(label) => `승률 구간 ${label}`}
+                labelFormatter={(_, payload) => {
+                  const row = payload?.[0]?.payload as { name?: string } | undefined;
+                  return row?.name ? `승률 구간 ${row.name}` : "";
+                }}
               />
-              {thBinName ? (
+              {histNumeric.length > 0 ? (
                 <ReferenceLine
-                  x={thBinName}
+                  x={Math.min(100, Math.max(0, data.threshold_pct))}
                   stroke={COL.refLine}
                   strokeDasharray="5 5"
                   label={{
@@ -329,8 +377,8 @@ export default function ThresholdWinPanel() {
                   }}
                 />
               ) : null}
-              <Bar dataKey="count" name="구간 수" radius={[3, 3, 0, 0]} maxBarSize={28}>
-                {histRows.map((e) => {
+              <Bar dataKey="count" name="구간 수" radius={[3, 3, 0, 0]} maxBarSize={22}>
+                {histNumeric.map((e) => {
                   const hi = e.bin_hi;
                   const thr = data.threshold_pct;
                   const fill =

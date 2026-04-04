@@ -42,6 +42,8 @@ export default function App() {
   const [batchInfo, setBatchInfo] = useState<string | null>(null);
   const [batchErr, setBatchErr] = useState<string | null>(null);
   const [batchLast, setBatchLast] = useState<BatchRefreshResult | null>(null);
+  /** 임계 승률 탭 「적용」과 지도 선 색 기준을 맞춤 */
+  const [mapThresholdPct, setMapThresholdPct] = useState(50);
 
   const refreshStats = useCallback(() => {
     fetchStats()
@@ -207,14 +209,14 @@ export default function App() {
       {tab === "threshold" ? (
         <div className="panel charts-panel-wrap">
           <h2 className="panel-title">임계 비율별 승패</h2>
-          <ThresholdWinPanel />
+          <ThresholdWinPanel onAppliedThresholdChange={setMapThresholdPct} />
         </div>
       ) : null}
 
       {tab === "map" ? (
         <div className="panel charts-panel-wrap map-panel-wrap">
           <h2 className="panel-title">대여소 지도 · 구간별 따릉이 승률</h2>
-          <MapPanel />
+          <MapPanel thresholdPct={mapThresholdPct} />
         </div>
       ) : null}
 

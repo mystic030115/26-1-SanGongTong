@@ -249,6 +249,24 @@
   margin-bottom: 0;
 }
 
+.threshold-hist-copy p {
+  margin: 0 0 0.65rem;
+  line-height: 1.55;
+}
+
+.threshold-hist-copy p:last-child {
+  margin-bottom: 0;
+}
+
+.threshold-hist-stat {
+  margin-top: 0.35rem !important;
+  padding: 0.65rem 0.85rem;
+  border-radius: 10px;
+  background: rgba(100, 116, 139, 0.12);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
 .threshold-root .threshold-control {
   background: var(--bg);
   border: 1px solid var(--border);

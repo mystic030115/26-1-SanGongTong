@@ -475,7 +475,7 @@ def compute_charts_summary() -> dict[str, Any]:
 
 def compute_map_graph(min_comparable: int, max_edges: int) -> dict[str, Any]:
     """
-    지도용: 대여소(점) + 출발·도착 쌍을 잇는 선(비교 가능 트립 중 따릉이 승률에 따라 선 색 채도만 변화, 굵기 동일).
+    지도용: 대여소(점) + 출발·도착 쌍을 잇는 선(승률·임계는 프론트에서 색상 처리).
     """
     if not TRIPS_CSV.exists():
         return {
@@ -825,7 +825,7 @@ def get_stats():
 
 @app.get("/api/usage")
 def odsay_usage():
-    """KST 기준 오늘 누적 ODsay HTTP 호출 수(자정에 0으로 리셋)."""
+    """KST 기준 오늘 누적: ODsay URL에 대한 `requests.get`이 응답을 받은 횟수(자정 리셋)."""
     return get_odsay_usage()
 
 
