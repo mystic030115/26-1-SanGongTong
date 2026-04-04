@@ -1,0 +1,3 @@
+# 로컬 일지·사용량 (원하면 커밋에서 제외)
+data/logs/
+data/cache/odsay_usage.json
