@@ -17,6 +17,7 @@ from typing import Any, List, Optional
 
 import numpy as np
 import pandas as pd
+from math import asin, cos, radians, sin, sqrt
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -116,6 +117,7 @@ def _read_pair_cache() -> pd.DataFrame:
                 "end_station_id",
                 "transit_total_min",
                 "transit_riding_min",
+                "transit_total_dist_m",
                 "transit_status",
                 "start_lon",
                 "start_lat",
@@ -158,6 +160,7 @@ def _load_merged_trips() -> pd.DataFrame:
         out = trips.copy()
         out["transit_total_min"] = pd.NA
         out["transit_riding_min"] = pd.NA
+        out["transit_total_dist_m"] = pd.NA
         out["transit_status"] = ""
         out["api_detail"] = pd.NA
         return out
@@ -170,12 +173,49 @@ def _load_merged_trips() -> pd.DataFrame:
             "end_station_id",
             "transit_total_min",
             "transit_riding_min",
+            "transit_total_dist_m",
             "transit_status",
             "api_detail",
         )
         if c in pc.columns
     ]
     return trips.merge(pc[cols], on=["start_station_id", "end_station_id"], how="left")
+
+
+@app.get("/api/od-distance/ratio")
+def od_distance_ratio(
+    threshold_m: int = Query(
+        700,
+        ge=1,
+        le=50_000,
+        description="ODsay info.totalDistance 기준, 이 거리(m) 이하인 출발·도착 쌍의 비율",
+    )
+):
+    pc = _read_pair_cache()
+    if pc.empty:
+        return {"empty": True, "threshold_m": int(threshold_m)}
+    if "transit_total_dist_m" not in pc.columns:
+        return {
+            "empty": True,
+            "threshold_m": int(threshold_m),
+            "error": "pair cache에 transit_total_dist_m 컬럼이 없습니다. 캐시를 갱신하세요.",
+        }
+
+    st = pc.get("transit_status")
+    ok = st.astype(str) == "OK" if st is not None else pd.Series([False] * len(pc))
+    dist = pd.to_numeric(pc["transit_total_dist_m"], errors="coerce")
+    usable = ok & dist.notna()
+    total_pairs = int(usable.sum())
+    within = int((usable & (dist <= float(threshold_m))).sum())
+    ratio = (within / total_pairs) if total_pairs > 0 else None
+
+    return {
+        "empty": False,
+        "threshold_m": int(threshold_m),
+        "total_ok_pairs_with_distance": total_pairs,
+        "within_threshold_pairs": within,
+        "ratio": ratio,
+    }
 
 
 def _mask_trips_station_pair_with_comparable(m: pd.DataFrame) -> pd.Series:
@@ -216,6 +256,120 @@ def _hist_bins(series: pd.Series, bins: int = 18, q_cap: float = 0.995) -> List[
         )
     return out
 
+
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    # WGS84 mean Earth radius (m)
+    r = 6_371_000.0
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+    a = sin(dlat / 2.0) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2.0) ** 2
+    return float(2.0 * r * asin(sqrt(a)))
+
+
+@app.get("/api/geo/od-distance-table")
+def geo_od_distance_table(
+    threshold_m: int = Query(700, ge=1, le=50_000),
+    sort_by: str = Query("dist_m", description="dist_m | trips"),
+    sort_dir: str = Query("asc", description="asc | desc"),
+    limit: int = Query(200, ge=10, le=5000),
+    offset: int = Query(0, ge=0, le=5_000_000),
+):
+    """
+    외부 API 없이 stations.xlsx의 위·경도로 OD 직선거리(m) 계산.
+    '모든 조합'은 실제 데이터(trips.csv)에 등장한 출발-도착 쌍 기준(현실적으로 전수 N^2는 과대).
+    """
+    trips = load_data()
+    if trips.empty:
+        return {"empty": True, "threshold_m": int(threshold_m)}
+
+    # OD pair frequency (trips count)
+    tmp = trips[["start_station_id", "end_station_id"]].copy()
+    tmp["start_station_id"] = tmp["start_station_id"].map(norm_station_id)
+    tmp["end_station_id"] = tmp["end_station_id"].map(norm_station_id)
+    g = (
+        tmp.dropna(subset=["start_station_id", "end_station_id"])
+        .groupby(["start_station_id", "end_station_id"], dropna=False)
+        .size()
+        .reset_index(name="trips")
+    )
+    # 자기 자신 → 자기 자신(0m) 구간은 제외
+    g = g.loc[g["start_station_id"] != g["end_station_id"]].reset_index(drop=True)
+
+    st = stations_table()[["station_id", "name", "위도", "경도"]].copy()
+    st["station_id"] = st["station_id"].map(norm_station_id)
+    st = st.dropna(subset=["station_id"]).drop_duplicates(subset=["station_id"], keep="last")
+
+    s = st.rename(
+        columns={"station_id": "start_station_id", "name": "start_name", "위도": "start_lat", "경도": "start_lon"}
+    )
+    e = st.rename(
+        columns={"station_id": "end_station_id", "name": "end_name", "위도": "end_lat", "경도": "end_lon"}
+    )
+    m = g.merge(s, on="start_station_id", how="left").merge(e, on="end_station_id", how="left")
+
+    m["start_lat"] = pd.to_numeric(m["start_lat"], errors="coerce")
+    m["start_lon"] = pd.to_numeric(m["start_lon"], errors="coerce")
+    m["end_lat"] = pd.to_numeric(m["end_lat"], errors="coerce")
+    m["end_lon"] = pd.to_numeric(m["end_lon"], errors="coerce")
+
+    ok = m[["start_lat", "start_lon", "end_lat", "end_lon"]].notna().all(axis=1)
+    m_ok = m.loc[ok].copy()
+    if m_ok.empty:
+        return {
+            "empty": True,
+            "threshold_m": int(threshold_m),
+            "error": "좌표가 있는 OD 쌍이 없습니다.",
+        }
+
+    # Vectorized-ish: apply over rows (still OK for few 10k pairs)
+    m_ok["dist_m"] = m_ok.apply(
+        lambda r: _haversine_m(float(r["start_lat"]), float(r["start_lon"]), float(r["end_lat"]), float(r["end_lon"])),
+        axis=1,
+    )
+    m_ok["over_threshold"] = m_ok["dist_m"] > float(threshold_m)
+
+    total_pairs = int(len(m_ok))
+    over_pairs = int(m_ok["over_threshold"].sum())
+    over_ratio = (over_pairs / total_pairs) if total_pairs > 0 else None
+
+    sb = (sort_by or "dist_m").strip().lower()
+    if sb not in ("dist_m", "trips"):
+        sb = "dist_m"
+    sd = (sort_dir or "asc").strip().lower()
+    asc = sd != "desc"
+
+    m_ok = m_ok.sort_values(by=[sb, "start_station_id", "end_station_id"], ascending=[asc, True, True])
+    page = m_ok.iloc[int(offset) : int(offset) + int(limit)]
+
+    rows = []
+    for _, r in page.iterrows():
+        sid = str(r["start_station_id"])
+        eid = str(r["end_station_id"])
+        sname = "" if pd.isna(r.get("start_name")) else str(r.get("start_name") or "").strip()
+        ename = "" if pd.isna(r.get("end_name")) else str(r.get("end_name") or "").strip()
+        rows.append(
+            {
+                "start_id": sid,
+                "end_id": eid,
+                "label": f"{sid}·{sname} → {eid}·{ename}",
+                "trips": int(r["trips"]) if pd.notna(r["trips"]) else 0,
+                "dist_m": round(float(r["dist_m"]), 1),
+                "over_threshold": bool(r["over_threshold"]),
+            }
+        )
+
+    return {
+        "empty": False,
+        "threshold_m": int(threshold_m),
+        "total_pairs_with_coords": total_pairs,
+        "over_threshold_pairs": over_pairs,
+        "over_threshold_ratio": over_ratio,
+        "sort_by": sb,
+        "sort_dir": "asc" if asc else "desc",
+        "limit": int(limit),
+        "offset": int(offset),
+        "rows": rows,
+    }
 
 def _hist_diff_min_stacked(
     diff_min: pd.Series, bike_faster_mask: pd.Series, n_bins: int = 20

@@ -4,12 +4,14 @@ import MapPanel from "./MapPanel";
 import ThresholdWinPanel from "./ThresholdWinPanel";
 import {
   fetchOdsayUsage,
+  fetchGeoOdDistanceTable,
   fetchStats,
   fetchStations,
   lookupPair,
   postBatchRefreshTop,
   type BatchRefreshResult,
   type GlobalStats,
+  type GeoOdDistanceTable,
   type LookupResult,
   type OdsayUsage,
   type Station,
@@ -36,6 +38,12 @@ export default function App() {
   const [lookupErr, setLookupErr] = useState<string | null>(null);
   const [tab, setTab] = useState<TabKey>("lookup");
   const [usage, setUsage] = useState<OdsayUsage | null>(null);
+  const [geo, setGeo] = useState<GeoOdDistanceTable | null>(null);
+  const [geoErr, setGeoErr] = useState<string | null>(null);
+  const [geoSortBy, setGeoSortBy] = useState<"dist_m" | "trips">("dist_m");
+  const [geoSortDir, setGeoSortDir] = useState<"asc" | "desc">("asc");
+  const [geoLimit, setGeoLimit] = useState(200);
+  const [geoOffset, setGeoOffset] = useState(0);
   const [batchN, setBatchN] = useState(20);
   const [batchForce, setBatchForce] = useState(false);
   const [batchLoading, setBatchLoading] = useState(false);
@@ -56,6 +64,35 @@ export default function App() {
       .then(setUsage)
       .catch(() => setUsage(null));
   }, []);
+
+  const refreshGeo = useCallback(
+    (next?: Partial<{ sortBy: "dist_m" | "trips"; sortDir: "asc" | "desc"; limit: number; offset: number }>) => {
+      const sortBy = next?.sortBy ?? geoSortBy;
+      const sortDir = next?.sortDir ?? geoSortDir;
+      const limit = next?.limit ?? geoLimit;
+      const offset = next?.offset ?? geoOffset;
+      setGeoErr(null);
+      fetchGeoOdDistanceTable({
+        thresholdM: 700,
+        sortBy,
+        sortDir,
+        limit,
+        offset,
+      })
+        .then((d) => {
+          setGeo(d);
+          setGeoSortBy(sortBy);
+          setGeoSortDir(sortDir);
+          setGeoLimit(limit);
+          setGeoOffset(offset);
+        })
+        .catch((e) => {
+          setGeo(null);
+          setGeoErr(String(e));
+        });
+    },
+    [geoLimit, geoOffset, geoSortBy, geoSortDir]
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -84,6 +121,19 @@ export default function App() {
       .catch(() => {
         if (!cancelled) setUsage(null);
       });
+    fetchGeoOdDistanceTable({
+      thresholdM: 700,
+      sortBy: "dist_m",
+      sortDir: "asc",
+      limit: 200,
+      offset: 0,
+    })
+      .then((d) => {
+        if (!cancelled) setGeo(d);
+      })
+      .catch((e) => {
+        if (!cancelled) setGeoErr(String(e));
+      });
     const t = window.setInterval(() => {
       fetchOdsayUsage()
         .then((u) => {
@@ -110,6 +160,7 @@ export default function App() {
       setResult(r);
       refreshStats();
       refreshUsage();
+      refreshGeo();
     } catch (e) {
       setLookupErr(String(e));
     } finally {
@@ -132,6 +183,7 @@ export default function App() {
       );
       refreshStats();
       refreshUsage();
+      refreshGeo();
     } catch (e) {
       setBatchErr(String(e));
     } finally {
@@ -141,24 +193,26 @@ export default function App() {
 
   return (
     <div className="app">
-      <div className="usage-banner" role="status">
-        <span className="usage-label">오늘 ODsay 호출</span>
-        <span className="usage-count mono">
-          {usage != null ? `${usage.count}회` : "—"}
-        </span>
-        {usage && (
-          <span className="usage-meta">
-            (KST {usage.kst_date} · 다음 0시 리셋{" "}
-            {new Date(usage.next_reset_kst).toLocaleString("ko-KR", {
-              timeZone: "Asia/Seoul",
-              month: "numeric",
-              day: "numeric",
-              hour: "2-digit",
-              minute: "2-digit",
-            })}
-            )
+      <div className="top-banners">
+        <div className="usage-banner" role="status">
+          <span className="usage-label">오늘 ODsay 호출</span>
+          <span className="usage-count mono">
+            {usage != null ? `${usage.count}회` : "—"}
           </span>
-        )}
+          {usage && (
+            <span className="usage-meta">
+              (KST {usage.kst_date} · 다음 0시 리셋{" "}
+              {new Date(usage.next_reset_kst).toLocaleString("ko-KR", {
+                timeZone: "Asia/Seoul",
+                month: "numeric",
+                day: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+              )
+            </span>
+          )}
+        </div>
       </div>
       <h1>따릉이 vs 대중교통</h1>
       <p className="sub">
@@ -222,6 +276,110 @@ export default function App() {
 
       {tab === "lookup" ? (
         <>
+      <section className="panel geo-banner">
+        <div className="geo-head">
+          <div>
+            <h2 className="panel-title" style={{ marginBottom: 6 }}>
+              조회·요약 · OD 직선거리(좌표)
+            </h2>
+            <p className="geo-meta">
+              {geo?.total_pairs_with_coords != null ? (
+                <>
+                  좌표 있는 OD 쌍 <strong>{geo.total_pairs_with_coords}</strong>개 · 700m 초과{" "}
+                  <strong>{geo.over_threshold_pairs ?? "—"}</strong>개 (
+                  <strong>
+                    {geo.over_threshold_ratio != null
+                      ? `${(geo.over_threshold_ratio * 100).toFixed(1)}%`
+                      : "—"}
+                  </strong>
+                  )
+                </>
+              ) : (
+                "trips.csv에 등장한 출발-도착 쌍 기준으로 계산"
+              )}
+            </p>
+          </div>
+          <div className="geo-controls">
+            <label>
+              정렬
+              <select
+                value={geoSortBy}
+                onChange={(e) => refreshGeo({ sortBy: e.target.value as "dist_m" | "trips", offset: 0 })}
+              >
+                <option value="dist_m">거리(m)</option>
+                <option value="trips">트립 수</option>
+              </select>
+            </label>
+            <label>
+              방향
+              <select
+                value={geoSortDir}
+                onChange={(e) => refreshGeo({ sortDir: e.target.value as "asc" | "desc", offset: 0 })}
+              >
+                <option value="asc">오름차순</option>
+                <option value="desc">내림차순</option>
+              </select>
+            </label>
+            <label>
+              표시
+              <input
+                type="number"
+                min={10}
+                max={5000}
+                value={geoLimit}
+                onChange={(e) => setGeoLimit(Number(e.target.value))}
+                onBlur={() => refreshGeo({ limit: Math.max(10, Math.min(5000, Math.floor(geoLimit) || 200)), offset: 0 })}
+              />
+            </label>
+            <button type="button" className="btn btn-ghost" onClick={() => refreshGeo({ offset: 0 })}>
+              새로고침
+            </button>
+          </div>
+        </div>
+        {geoErr && <p className="err">{geoErr}</p>}
+        <div className="geo-table-wrap">
+          <table className="geo-table">
+            <thead>
+              <tr>
+                <th style={{ width: "55%" }}>OD</th>
+                <th className="num">거리(m)</th>
+                <th className="num">트립</th>
+                <th style={{ width: 110 }}>700m</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(geo?.rows ?? []).map((r) => (
+                <tr key={`${r.start_id}-${r.end_id}`} className={r.over_threshold ? "over" : ""}>
+                  <td className="label">{r.label}</td>
+                  <td className="num mono">{r.dist_m.toFixed(1)}</td>
+                  <td className="num mono">{r.trips}</td>
+                  <td className="mono">{r.over_threshold ? "초과" : "이하"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="geo-pager">
+          <button
+            type="button"
+            className="btn btn-ghost"
+            disabled={geoOffset <= 0}
+            onClick={() => refreshGeo({ offset: Math.max(0, geoOffset - geoLimit) })}
+          >
+            이전
+          </button>
+          <span className="geo-meta mono">
+            offset {geoOffset} · limit {geoLimit}
+          </span>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => refreshGeo({ offset: geoOffset + geoLimit })}
+          >
+            다음
+          </button>
+        </div>
+      </section>
       <section className="grid-stats">
         <div className="stat-card">
           <div className="label">비교 가능 트립</div>

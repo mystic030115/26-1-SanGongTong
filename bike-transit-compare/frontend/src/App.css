@@ -4,17 +4,121 @@
   padding: 2rem 1.25rem 4rem;
 }
 
+.top-banners {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+}
+
 .usage-banner {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: 0.5rem 1rem;
   padding: 0.65rem 1rem;
-  margin-bottom: 1.25rem;
   border-radius: 12px;
   border: 1px solid var(--border);
   background: var(--surface);
   font-size: 0.9rem;
+}
+
+.geo-banner {
+  margin-bottom: 1rem;
+}
+
+.geo-head {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.geo-meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.35;
+}
+
+.geo-controls {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+
+.geo-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.geo-controls select,
+.geo-controls input[type="number"] {
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+}
+
+.geo-table-wrap {
+  margin-top: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.geo-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  font-size: 0.9rem;
+}
+
+.geo-table th,
+.geo-table td {
+  padding: 0.55rem 0.7rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.geo-table thead th {
+  position: sticky;
+  top: 0;
+  background: color-mix(in srgb, var(--surface) 90%, var(--bg));
+  z-index: 1;
+  text-align: left;
+  color: var(--muted);
+  font-weight: 650;
+  font-size: 0.82rem;
+}
+
+.geo-table td.num,
+.geo-table th.num {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.geo-table td.label {
+  line-height: 1.35;
+}
+
+.geo-table tr.over td {
+  background: color-mix(in srgb, #ff5a5a 12%, var(--surface));
+}
+
+.geo-pager {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  align-items: center;
+  margin-top: 0.65rem;
 }
 
 .usage-label {

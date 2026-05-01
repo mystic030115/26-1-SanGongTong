@@ -335,6 +335,7 @@ def fetch_transit_time(start_lon, start_lat, end_lon, end_lat):
             {
                 "transit_total_min": pd.NA,
                 "transit_riding_min": pd.NA,
+                "transit_total_dist_m": pd.NA,
                 "transit_status": "API_ERROR",
                 "api_detail": "response root is not a JSON object",
             },
@@ -350,6 +351,7 @@ def fetch_transit_time(start_lon, start_lat, end_lon, end_lat):
             {
                 "transit_total_min": pd.NA,
                 "transit_riding_min": pd.NA,
+                "transit_total_dist_m": pd.NA,
                 "transit_status": "API_ERROR",
                 "api_detail": detail,
             },
@@ -363,6 +365,7 @@ def fetch_transit_time(start_lon, start_lat, end_lon, end_lat):
             {
                 "transit_total_min": pd.NA,
                 "transit_riding_min": pd.NA,
+                "transit_total_dist_m": pd.NA,
                 "transit_status": "NO_PATH_OR_TOO_CLOSE",
                 "api_detail": "",
             },
@@ -381,10 +384,14 @@ def fetch_transit_time(start_lon, start_lat, end_lon, end_lat):
             {
                 "transit_total_min": pd.NA,
                 "transit_riding_min": pd.NA,
+                "transit_total_dist_m": pd.NA,
                 "transit_status": "API_ERROR",
                 "api_detail": "path missing info.totalTime",
             },
         )
+
+    # ODsay: info.totalDistance (m) — 없을 수도 있음.
+    total_dist_m = info.get("totalDistance")
 
     riding_time = sum(
         seg.get("sectionTime", 0)
@@ -397,6 +404,7 @@ def fetch_transit_time(start_lon, start_lat, end_lon, end_lat):
         {
             "transit_total_min": total_time,
             "transit_riding_min": riding_time,
+            "transit_total_dist_m": total_dist_m if total_dist_m is not None else pd.NA,
             "transit_status": "OK",
             "api_detail": "",
         },
@@ -409,6 +417,9 @@ def _row_from_cache(r) -> dict:
         "end_station_id": r["end_station_id"],
         "transit_total_min": r["transit_total_min"],
         "transit_riding_min": r["transit_riding_min"],
+        "transit_total_dist_m": r["transit_total_dist_m"]
+        if "transit_total_dist_m" in r.index
+        else pd.NA,
         "transit_status": r["transit_status"],
     }
     for c in ("start_lon", "start_lat", "end_lon", "end_lat"):
@@ -425,6 +436,7 @@ def _put_coord_cache(coord_transit_cache: dict, ck: tuple, out: dict) -> None:
         coord_transit_cache[ck] = {
             "transit_total_min": out["transit_total_min"],
             "transit_riding_min": out["transit_riding_min"],
+            "transit_total_dist_m": out.get("transit_total_dist_m", pd.NA),
             "transit_status": out["transit_status"],
         }
 

@@ -54,6 +54,66 @@ export async function fetchOdsayUsage(): Promise<OdsayUsage> {
   return r.json();
 }
 
+export type OdDistanceRatio = {
+  empty?: boolean;
+  error?: string;
+  threshold_m: number;
+  total_ok_pairs_with_distance?: number;
+  within_threshold_pairs?: number;
+  ratio: number | null;
+};
+
+export async function fetchOdDistanceRatio(
+  thresholdM: number
+): Promise<OdDistanceRatio> {
+  const q = new URLSearchParams({ threshold_m: String(thresholdM) });
+  const r = await fetch(`/api/od-distance/ratio?${q}`);
+  if (!r.ok) throw new Error("OD 거리 비율 로드 실패");
+  return r.json();
+}
+
+export type GeoOdDistanceRow = {
+  start_id: string;
+  end_id: string;
+  label: string;
+  trips: number;
+  dist_m: number;
+  over_threshold: boolean;
+};
+
+export type GeoOdDistanceTable = {
+  empty?: boolean;
+  error?: string;
+  threshold_m: number;
+  total_pairs_with_coords?: number;
+  over_threshold_pairs?: number;
+  over_threshold_ratio?: number | null;
+  sort_by?: "dist_m" | "trips";
+  sort_dir?: "asc" | "desc";
+  limit?: number;
+  offset?: number;
+  rows: GeoOdDistanceRow[];
+};
+
+export async function fetchGeoOdDistanceTable(opts: {
+  thresholdM: number;
+  sortBy: "dist_m" | "trips";
+  sortDir: "asc" | "desc";
+  limit: number;
+  offset: number;
+}): Promise<GeoOdDistanceTable> {
+  const q = new URLSearchParams({
+    threshold_m: String(opts.thresholdM),
+    sort_by: opts.sortBy,
+    sort_dir: opts.sortDir,
+    limit: String(opts.limit),
+    offset: String(opts.offset),
+  });
+  const r = await fetch(`/api/geo/od-distance-table?${q}`);
+  if (!r.ok) throw new Error("OD 직선거리 표 로드 실패");
+  return r.json();
+}
+
 export type BatchRefreshResult = {
   ok: boolean;
   pairs_in_run?: number;
