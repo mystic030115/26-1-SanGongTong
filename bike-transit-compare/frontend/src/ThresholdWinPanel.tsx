@@ -327,9 +327,27 @@ export default function ThresholdWinPanel({
             </p>
           ) : null}
         </div>
+        <div
+          className="threshold-hist-refbar"
+          style={{
+            display: "flex",
+            justifyContent: "flex-end",
+            marginBottom: 8,
+            padding: "6px 10px",
+            borderRadius: 10,
+            border: `1px solid ${COL.grid}`,
+            background: "rgba(12, 16, 22, 0.55)",
+            fontSize: 12,
+            color: COL.text,
+          }}
+        >
+          <span className="mono" style={{ color: COL.refLine }}>
+            세로 점선 = 적용 임계 <strong>{data.threshold_pct}%</strong>
+          </span>
+        </div>
         <div className="chart-box chart-box-tall">
           <ResponsiveContainer width="100%" height={360}>
-            <BarChart data={histNumeric} margin={{ top: 28, right: 12, bottom: 8, left: 4 }}>
+            <BarChart data={histNumeric} margin={{ top: 12, right: 12, bottom: 8, left: 4 }}>
               <CartesianGrid strokeDasharray="3 3" stroke={COL.grid} />
               <XAxis
                 type="number"
@@ -369,12 +387,6 @@ export default function ThresholdWinPanel({
                   x={Math.min(100, Math.max(0, data.threshold_pct))}
                   stroke={COL.refLine}
                   strokeDasharray="5 5"
-                  label={{
-                    value: `임계 ${data.threshold_pct}%`,
-                    fill: COL.refLine,
-                    fontSize: 11,
-                    position: "top",
-                  }}
                 />
               ) : null}
               <Bar dataKey="count" name="구간 수" radius={[3, 3, 0, 0]} maxBarSize={22}>

@@ -20,13 +20,13 @@ from .app_journal import (
     log_build_pair_cache_done,
     write_last_run_summary,
 )
-from .odsay_usage import record_odsay_call
+from .tmap_usage import record_tmap_call
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
-ODSAY_API_KEY = os.getenv("ODsay_API_KEY")
-ODsay_URL = "https://api.odsay.com/v1/api/searchPubTransPathT"
+TMAP_APP_KEY = os.getenv("TMAP_APP_KEY")
+TMAP_TRANSIT_URL = "https://apis.openapi.sk.com/transit/routes"
 
 DATA_RAW = ROOT / "data" / "raw"
 DATA_CACHE = ROOT / "data" / "cache"
@@ -230,47 +230,29 @@ def load_data():
     return trips
 
 
-def _odsay_error_dict(raw) -> dict:
-    if isinstance(raw, dict):
-        return raw
-    if isinstance(raw, list) and raw and isinstance(raw[0], dict):
-        return raw[0]
-    return {}
-
-
-def _odsay_result_dict(raw) -> dict:
-    if isinstance(raw, dict):
-        return raw
-    return {}
-
-
-def _odsay_paths_list(raw_paths):
-    if raw_paths is None:
+def _tmap_legs_list(raw_legs):
+    if raw_legs is None:
         return []
-    if isinstance(raw_paths, list):
-        return [p for p in raw_paths if isinstance(p, dict)]
-    if isinstance(raw_paths, dict):
-        return [raw_paths]
+    if isinstance(raw_legs, list):
+        return [l for l in raw_legs if isinstance(l, dict)]
+    if isinstance(raw_legs, dict):
+        return [raw_legs]
     return []
 
 
-def _subpath_segments(sub_path):
-    if isinstance(sub_path, list):
-        return [s for s in sub_path if isinstance(s, dict)]
-    if isinstance(sub_path, dict):
-        return [sub_path]
-    return []
-
-
-def _odsay_journal_return(ck: tuple, out: dict) -> dict:
+def _tmap_journal_return(ck: tuple, out: dict) -> dict:
     ad = out.get("api_detail")
+    http_status = out.get("http_status")
+    body_head = out.get("body_head")
     append_jsonl(
         {
-            "kind": "odsay_http",
+            "kind": "tmap_http",
             "source": "fetch_transit_time",
             "coord_key": list(ck),
             "transit_status": str(out.get("transit_status", "")),
             "api_detail": (str(ad)[:240] if ad is not None and str(ad) != "nan" else ""),
+            "http_status": int(http_status) if isinstance(http_status, (int, float)) else None,
+            "body_head": str(body_head)[:400] if body_head is not None else None,
         }
     )
     return out
@@ -278,22 +260,38 @@ def _odsay_journal_return(ck: tuple, out: dict) -> dict:
 
 def fetch_transit_time(start_lon, start_lat, end_lon, end_lat):
     ck = od_coord_key(start_lon, start_lat, end_lon, end_lat)
-    params = {
-        "apiKey": ODSAY_API_KEY,
-        "SX": start_lon,
-        "SY": start_lat,
-        "EX": end_lon,
-        "EY": end_lat,
-        "SearchPathType": 0,
-        "OPT": 0,
+    if not TMAP_APP_KEY:
+        return _tmap_journal_return(
+            ck,
+            {
+                "transit_total_min": pd.NA,
+                "transit_riding_min": pd.NA,
+                "transit_total_dist_m": pd.NA,
+                "transit_status": "API_ERROR",
+                "api_detail": "TMAP_APP_KEY missing in .env",
+            },
+        )
+    headers = {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "appKey": TMAP_APP_KEY,
+    }
+    body = {
+        "startX": str(start_lon),
+        "startY": str(start_lat),
+        "endX": str(end_lon),
+        "endY": str(end_lat),
+        "format": "json",
+        "lang": 0,
+        "count": 1,
     }
 
     try:
-        resp = requests.get(ODsay_URL, params=params, timeout=20)
+        resp = requests.post(TMAP_TRANSIT_URL, headers=headers, json=body, timeout=25)
     except RequestException as e:
         append_jsonl(
             {
-                "kind": "odsay_http",
+                "kind": "tmap_http",
                 "source": "fetch_transit_time",
                 "phase": "request",
                 "coord_key": list(ck),
@@ -302,35 +300,64 @@ def fetch_transit_time(start_lon, start_lat, end_lon, end_lat):
         )
         raise
 
-    # ODsay 서버가 응답 헤더/본문을 돌려준 뒤에만 1회 적립(연결 실패·DNS 등은 제외).
+    # TMAP 서버가 응답 헤더/본문을 돌려준 뒤에만 1회 적립(연결 실패·DNS 등은 제외).
     try:
-        record_odsay_call()
+        record_tmap_call()
     except OSError as e:
         append_jsonl(
             {
-                "kind": "odsay_usage_write_failed",
+                "kind": "tmap_usage_write_failed",
                 "source": "fetch_transit_time",
                 "error": str(e)[:300],
             }
         )
 
-    try:
-        resp.raise_for_status()
-    except HTTPError:
+    if not getattr(resp, "ok", False):
+        # 4xx/5xx는 웹 API를 500으로 터뜨리지 말고 캐시에 API_ERROR로 남긴다.
+        status = getattr(resp, "status_code", None)
+        body = ""
+        try:
+            body = (resp.text or "")[:400]
+        except Exception:
+            body = ""
         append_jsonl(
             {
-                "kind": "odsay_http",
+                "kind": "tmap_http",
                 "source": "fetch_transit_time",
                 "phase": "http",
                 "coord_key": list(ck),
-                "http_status": getattr(resp, "status_code", None),
+                "http_status": status,
+                "body_head": body,
             }
         )
-        raise
+        return _tmap_journal_return(
+            ck,
+            {
+                "transit_total_min": pd.NA,
+                "transit_riding_min": pd.NA,
+                "transit_total_dist_m": pd.NA,
+                "transit_status": "API_ERROR",
+                "api_detail": f"http_status={status}",
+                "http_status": status,
+                "body_head": body,
+            },
+        )
 
-    data = resp.json()
+    try:
+        data = resp.json()
+    except JSONDecodeError:
+        return _tmap_journal_return(
+            ck,
+            {
+                "transit_total_min": pd.NA,
+                "transit_riding_min": pd.NA,
+                "transit_total_dist_m": pd.NA,
+                "transit_status": "API_ERROR",
+                "api_detail": "response is not valid JSON",
+            },
+        )
     if not isinstance(data, dict):
-        return _odsay_journal_return(
+        return _tmap_journal_return(
             ck,
             {
                 "transit_total_min": pd.NA,
@@ -341,26 +368,20 @@ def fetch_transit_time(start_lon, start_lat, end_lon, end_lat):
             },
         )
 
-    err = _odsay_error_dict(data.get("error"))
-    code = str(err.get("code", "0"))
-    if code != "0":
-        msg = err.get("message") or err.get("msg") or ""
-        detail = (f"code={code} " + str(msg)).strip()[:500]
-        return _odsay_journal_return(
-            ck,
-            {
-                "transit_total_min": pd.NA,
-                "transit_riding_min": pd.NA,
-                "transit_total_dist_m": pd.NA,
-                "transit_status": "API_ERROR",
-                "api_detail": detail,
-            },
-        )
+    # TMAP Transit: metaData.plan.itineraries[*]
+    md = data.get("metaData") if isinstance(data.get("metaData"), dict) else {}
+    plan = md.get("plan") if isinstance(md.get("plan"), dict) else {}
+    its = plan.get("itineraries")
+    if isinstance(its, dict):
+        itineraries = [its]
+    elif isinstance(its, list):
+        itineraries = [i for i in its if isinstance(i, dict)]
+    else:
+        itineraries = []
 
-    result = _odsay_result_dict(data.get("result"))
-    paths = _odsay_paths_list(result.get("path"))
-    if not paths:
-        return _odsay_journal_return(
+    if not itineraries:
+        # docs: "거리 가까움/정류장 매핑 실패" 등은 200으로 오고 경로가 없을 수 있음
+        return _tmap_journal_return(
             ck,
             {
                 "transit_total_min": pd.NA,
@@ -371,40 +392,53 @@ def fetch_transit_time(start_lon, start_lat, end_lon, end_lat):
             },
         )
 
-    def _path_total_time(p):
-        info = p.get("info") if isinstance(p.get("info"), dict) else {}
-        return info.get("totalTime", 10**9)
+    def _it_total_time_sec(it: dict) -> float:
+        v = it.get("totalTime")
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 10**18
 
-    best = min(paths, key=_path_total_time)
-    info = best.get("info") if isinstance(best.get("info"), dict) else {}
-    total_time = info.get("totalTime")
-    if total_time is None:
-        return _odsay_journal_return(
+    best = min(itineraries, key=_it_total_time_sec)
+    total_sec = _it_total_time_sec(best)
+    if total_sec >= 10**17:
+        return _tmap_journal_return(
             ck,
             {
                 "transit_total_min": pd.NA,
                 "transit_riding_min": pd.NA,
                 "transit_total_dist_m": pd.NA,
                 "transit_status": "API_ERROR",
-                "api_detail": "path missing info.totalTime",
+                "api_detail": "missing itineraries.totalTime",
             },
         )
 
-    # ODsay: info.totalDistance (m) — 없을 수도 있음.
-    total_dist_m = info.get("totalDistance")
+    dist_m = best.get("totalDistance")
+    try:
+        dist_m_f = float(dist_m) if dist_m is not None else None
+    except (TypeError, ValueError):
+        dist_m_f = None
 
-    riding_time = sum(
-        seg.get("sectionTime", 0)
-        for seg in _subpath_segments(best.get("subPath"))
-        if seg.get("trafficType") in (1, 2)
-    )
+    # riding: WALK 제외한 leg sectionTime 합 (초)
+    legs = _tmap_legs_list(best.get("legs"))
+    ride_sec = 0.0
+    for leg in legs:
+        mode = str(leg.get("mode", "")).upper()
+        if mode == "WALK":
+            continue
+        try:
+            ride_sec += float(leg.get("sectionTime", 0) or 0)
+        except (TypeError, ValueError):
+            continue
 
-    return _odsay_journal_return(
+    return _tmap_journal_return(
         ck,
         {
-            "transit_total_min": total_time,
-            "transit_riding_min": riding_time,
-            "transit_total_dist_m": total_dist_m if total_dist_m is not None else pd.NA,
+            # 기존 컬럼명이 _min이지만 실제 의미는 "초"였던 레거시(ODsay/ TM{A}P totalTime도 초).
+            # 여기서는 일관되게 '초'를 저장하고, 표시/통계 쪽에서 분으로 변환한다.
+            "transit_total_min": total_sec,
+            "transit_riding_min": ride_sec,
+            "transit_total_dist_m": dist_m_f if dist_m_f is not None else pd.NA,
             "transit_status": "OK",
             "api_detail": "",
         },
@@ -583,7 +617,7 @@ def build_pair_cache(
                     did_call_api = True
                     api_calls += 1
                 except HTTPError as e:
-                    # record_odsay_call()은 이미 실행됨(응답 수신 후).
+                    # record_tmap_call()은 이미 실행됨(응답 수신 후).
                     did_call_api = True
                     api_calls += 1
                     out = {**err_out, "api_detail": str(e)[:500]}
@@ -596,7 +630,7 @@ def build_pair_cache(
                     api_calls += 1
                     out = {**err_out, "api_detail": str(e)[:500]}
                 except RequestException as e:
-                    # get() 단계 실패 등 — 응답 객체 없음, record_odsay_call 미실행.
+                    # get() 단계 실패 등 — 응답 객체 없음, record_tmap_call 미실행.
                     did_call_api = True
                     out = {**err_out, "api_detail": str(e)[:500]}
                 except Exception as e:
@@ -619,7 +653,7 @@ def build_pair_cache(
     DATA_CACHE.mkdir(parents=True, exist_ok=True)
     full_cache = pd.DataFrame(list(cache_map.values()))
     full_cache.to_csv(TRANSIT_PAIRS_CSV, index=False)
-    print(f"[build_pair_cache] ODsay API HTTP 요청 수(이번 실행): {api_calls}")
+    print(f"[build_pair_cache] TMAP API HTTP 요청 수(이번 실행): {api_calls}")
     log_build_pair_cache_done(
         pairs_in_run=int(len(pairs)),
         fetch_path_attempts=int(api_calls),

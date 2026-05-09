@@ -1,24 +1,60 @@
-import { useCallback, useEffect, useState } from "react";
-import ChartsPanel from "./ChartsPanel";
+import { Component, type ErrorInfo, type ReactNode, useCallback, useEffect, useState } from "react";
+import DistrictSavingsPanel from "./DistrictSavingsPanel";
 import MapPanel from "./MapPanel";
 import ThresholdWinPanel from "./ThresholdWinPanel";
 import {
   fetchOdsayUsage,
   fetchGeoOdDistanceTable,
+  fetchTmapByDistrictSummary,
+  fetchTmapFillStatus,
   fetchStats,
   fetchStations,
   lookupPair,
   postBatchRefreshTop,
+  postTmapFillUntilComplete,
   type BatchRefreshResult,
   type GlobalStats,
   type GeoOdDistanceTable,
   type LookupResult,
   type OdsayUsage,
   type Station,
+  type TmapByDistrictSummary,
+  type TmapFillStatus,
 } from "./api";
 import "./App.css";
 
 type TabKey = "lookup" | "charts" | "threshold" | "map";
+
+/** 하위 패널 렌더 예외 시 전체 앱이 하얗게 죽는 것 방지 */
+class PanelErrorBoundary extends Component<
+  { label: string; children: ReactNode },
+  { err: Error | null }
+> {
+  state: { err: Error | null } = { err: null };
+
+  static getDerivedStateFromError(e: Error) {
+    return { err: e };
+  }
+
+  componentDidCatch(e: Error, info: ErrorInfo) {
+    console.error(`[PanelErrorBoundary ${this.props.label}]`, e, info.componentStack);
+  }
+
+  render() {
+    if (this.state.err) {
+      return (
+        <div className="panel charts-panel-wrap" role="alert">
+          <h2 className="panel-title">{this.props.label}</h2>
+          <p className="err" style={{ whiteSpace: "pre-wrap" }}>
+            {this.state.err.message}
+          </p>
+          <p className="charts-meta">개발자 도구 콘솔에 스택이 기록되었습니다. 새로고침 후에도 반복되면 이 메시지를 알려 주세요.</p>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 function pct(rate: number | null): string {
   if (rate == null || Number.isNaN(rate)) return "—";
@@ -38,6 +74,12 @@ export default function App() {
   const [lookupErr, setLookupErr] = useState<string | null>(null);
   const [tab, setTab] = useState<TabKey>("lookup");
   const [usage, setUsage] = useState<OdsayUsage | null>(null);
+  const [districtCache, setDistrictCache] = useState<TmapByDistrictSummary | null>(null);
+  const [districtCacheErr, setDistrictCacheErr] = useState<string | null>(null);
+  const [districtCacheLoading, setDistrictCacheLoading] = useState(false);
+  const [tmapFill, setTmapFill] = useState<TmapFillStatus | null>(null);
+  const [tmapFillErr, setTmapFillErr] = useState<string | null>(null);
+  const [tmapFillStarting, setTmapFillStarting] = useState(false);
   const [geo, setGeo] = useState<GeoOdDistanceTable | null>(null);
   const [geoErr, setGeoErr] = useState<string | null>(null);
   const [geoSortBy, setGeoSortBy] = useState<"dist_m" | "trips">("dist_m");
@@ -52,6 +94,14 @@ export default function App() {
   const [batchLast, setBatchLast] = useState<BatchRefreshResult | null>(null);
   /** 임계 승률 탭 「적용」과 지도 선 색 기준을 맞춤 */
   const [mapThresholdPct, setMapThresholdPct] = useState(50);
+  const [rawGu, setRawGu] = useState<string>("강남구");
+  const [rawList, setRawList] = useState<string[]>([]);
+  const [rawStatus, setRawStatus] = useState<string>("");
+  const [rawRows, setRawRows] = useState<any[]>([]);
+  const [rawOffset, setRawOffset] = useState(0);
+  const [rawLimit, setRawLimit] = useState(200);
+  const [rawErr, setRawErr] = useState<string | null>(null);
+  const [rawLoading, setRawLoading] = useState(false);
 
   const refreshStats = useCallback(() => {
     fetchStats()
@@ -64,6 +114,41 @@ export default function App() {
       .then(setUsage)
       .catch(() => setUsage(null));
   }, []);
+
+  const refreshDistrictCache = useCallback(() => {
+    setDistrictCacheLoading(true);
+    setDistrictCacheErr(null);
+    fetchTmapByDistrictSummary()
+      .then(setDistrictCache)
+      .catch((e) => {
+        setDistrictCache(null);
+        setDistrictCacheErr(String(e));
+      })
+      .finally(() => setDistrictCacheLoading(false));
+  }, []);
+
+  const refreshTmapFill = useCallback(() => {
+    fetchTmapFillStatus()
+      .then((s) => {
+        setTmapFill(s);
+        setTmapFillErr(null);
+      })
+      .catch((e) => setTmapFillErr(String(e)));
+  }, []);
+
+  const onStartTmapFill = useCallback(async () => {
+    setTmapFillStarting(true);
+    setTmapFillErr(null);
+    try {
+      await postTmapFillUntilComplete({});
+      refreshTmapFill();
+      refreshDistrictCache();
+    } catch (e) {
+      setTmapFillErr(String(e));
+    } finally {
+      setTmapFillStarting(false);
+    }
+  }, [refreshDistrictCache, refreshTmapFill]);
 
   const refreshGeo = useCallback(
     (next?: Partial<{ sortBy: "dist_m" | "trips"; sortDir: "asc" | "desc"; limit: number; offset: number }>) => {
@@ -121,6 +206,18 @@ export default function App() {
       .catch(() => {
         if (!cancelled) setUsage(null);
       });
+    fetchTmapByDistrictSummary()
+      .then((s) => {
+        if (!cancelled) setDistrictCache(s);
+      })
+      .catch((e) => {
+        if (!cancelled) setDistrictCacheErr(String(e));
+      });
+    fetchTmapFillStatus()
+      .then((fs) => {
+        if (!cancelled) setTmapFill(fs);
+      })
+      .catch(() => {});
     fetchGeoOdDistanceTable({
       thresholdM: 700,
       sortBy: "dist_m",
@@ -140,12 +237,78 @@ export default function App() {
           if (!cancelled) setUsage(u);
         })
         .catch(() => {});
+      fetchTmapByDistrictSummary()
+        .then((s) => {
+          if (!cancelled) setDistrictCache(s);
+        })
+        .catch(() => {});
+      fetchTmapFillStatus()
+        .then((fs) => {
+          if (!cancelled) setTmapFill(fs);
+        })
+        .catch(() => {});
     }, 30_000);
     return () => {
       cancelled = true;
       window.clearInterval(t);
     };
   }, []);
+
+  const refreshRawList = useCallback(() => {
+    fetch("/api/tmap-by-district/list")
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("raw list 로드 실패"))))
+      .then((j) => {
+        const gus = (j?.gus as string[]) || [];
+        setRawList(gus);
+        if (gus.length && !gus.includes(rawGu)) setRawGu(gus[0]);
+      })
+      .catch(() => setRawList([]));
+  }, [rawGu]);
+
+  const refreshRawTable = useCallback(
+    (next?: Partial<{ gu: string; status: string; offset: number; limit: number }>) => {
+      const gu = next?.gu ?? rawGu;
+      const status = next?.status ?? rawStatus;
+      const offset = next?.offset ?? rawOffset;
+      const limit = next?.limit ?? rawLimit;
+      setRawLoading(true);
+      setRawErr(null);
+      const q = new URLSearchParams({
+        gu,
+        offset: String(offset),
+        limit: String(limit),
+        status,
+      });
+      fetch(`/api/tmap-by-district/table?${q}`)
+        .then(async (r) => {
+          if (!r.ok) throw new Error(await r.text());
+          return r.json();
+        })
+        .then((j) => {
+          setRawRows((j?.rows as any[]) || []);
+          setRawGu(gu);
+          setRawStatus(status);
+          setRawOffset(offset);
+          setRawLimit(limit);
+        })
+        .catch((e) => setRawErr(String(e)))
+        .finally(() => setRawLoading(false));
+    },
+    [rawGu, rawLimit, rawOffset, rawStatus]
+  );
+
+  useEffect(() => {
+    refreshRawList();
+  }, [refreshRawList]);
+
+  useEffect(() => {
+    if (!tmapFill?.active) return;
+    const t = window.setInterval(() => {
+      refreshTmapFill();
+      refreshDistrictCache();
+    }, 5000);
+    return () => window.clearInterval(t);
+  }, [tmapFill?.active, refreshDistrictCache, refreshTmapFill]);
 
   const onLookup = async () => {
     if (!startId || !endId) return;
@@ -195,14 +358,14 @@ export default function App() {
     <div className="app">
       <div className="top-banners">
         <div className="usage-banner" role="status">
-          <span className="usage-label">오늘 ODsay 호출</span>
+          <span className="usage-label">TMAP 호출(캐시 행 누적)</span>
           <span className="usage-count mono">
             {usage != null ? `${usage.count}회` : "—"}
           </span>
-          {usage && (
+          {usage?.last_updated_utc && (
             <span className="usage-meta">
-              (KST {usage.kst_date} · 다음 0시 리셋{" "}
-              {new Date(usage.next_reset_kst).toLocaleString("ko-KR", {
+              (업데이트{" "}
+              {new Date(usage.last_updated_utc).toLocaleString("ko-KR", {
                 timeZone: "Asia/Seoul",
                 month: "numeric",
                 day: "numeric",
@@ -216,7 +379,7 @@ export default function App() {
       </div>
       <h1>따릉이 vs 대중교통</h1>
       <p className="sub">
-        출발·도착 대여소를 고르고 조회하세요. 캐시에 있으면 ODsay를 다시
+        출발·도착 대여소를 고르고 조회하세요. 캐시에 있으면 TMAP을 다시
         부르지 않습니다.
       </p>
 
@@ -233,7 +396,7 @@ export default function App() {
           className={tab === "charts" ? "tab active" : "tab"}
           onClick={() => setTab("charts")}
         >
-          통계 차트
+          가설 1 · Depth/Coverage
         </button>
         <button
           type="button"
@@ -254,10 +417,11 @@ export default function App() {
       {loadErr && <p className="err">{loadErr}</p>}
 
       {tab === "charts" ? (
-        <div className="panel charts-panel-wrap">
-          <h2 className="panel-title">전체 데이터 시각화</h2>
-          <ChartsPanel />
-        </div>
+        <PanelErrorBoundary label="가설 1 · Depth/Coverage">
+          <div className="panel charts-panel-wrap">
+            <DistrictSavingsPanel />
+          </div>
+        </PanelErrorBoundary>
       ) : null}
 
       {tab === "threshold" ? (
@@ -280,80 +444,212 @@ export default function App() {
         <div className="geo-head">
           <div>
             <h2 className="panel-title" style={{ marginBottom: 6 }}>
-              조회·요약 · OD 직선거리(좌표)
+              조회·요약 · 구별 TMAP 캐시 현황
             </h2>
             <p className="geo-meta">
-              {geo?.total_pairs_with_coords != null ? (
-                <>
-                  좌표 있는 OD 쌍 <strong>{geo.total_pairs_with_coords}</strong>개 · 700m 초과{" "}
-                  <strong>{geo.over_threshold_pairs ?? "—"}</strong>개 (
-                  <strong>
-                    {geo.over_threshold_ratio != null
-                      ? `${(geo.over_threshold_ratio * 100).toFixed(1)}%`
-                      : "—"}
-                  </strong>
-                  )
-                </>
-              ) : (
-                "trips.csv에 등장한 출발-도착 쌍 기준으로 계산"
-              )}
+              `data/cache/tmap_by_district`에 쌓인 캐시를 기준으로 각 구별 경로(OD쌍) 누적량과 상태를 요약합니다.
             </p>
+            {districtCache?.overall?.expected_pairs_total_sum ? (
+              <p className="geo-meta mono" style={{ marginTop: 6 }}>
+                전체 진행률(OK/기대쌍){" "}
+                <strong>
+                  {districtCache.overall.completion_ratio == null
+                    ? "—"
+                    : `${(districtCache.overall.completion_ratio * 100).toFixed(1)}%`}
+                </strong>{" "}
+                ({districtCache.overall.ok_rows_sum ?? 0}/{districtCache.overall.expected_pairs_total_sum}
+                {districtCache.overall.cached_rows_sum != null ? (
+                  <>
+                    {" "}
+                    · 총 CSV 행 {districtCache.overall.cached_rows_sum}
+                  </>
+                ) : null}
+                )
+                {districtCache.overall.eta?.eta_finish_at_kst && districtCache.overall.eta?.rows_per_min ? (
+                  <>
+                    {" "}
+                    · 속도{" "}
+                    <strong>{districtCache.overall.eta.rows_per_min.toFixed(1)}</strong> 행/분 · 예상 종료{" "}
+                    <strong>
+                      {new Date(districtCache.overall.eta.eta_finish_at_kst).toLocaleString("ko-KR", {
+                        timeZone: "Asia/Seoul",
+                        month: "numeric",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </strong>
+                  </>
+                ) : (
+                  " · 예상 종료: 계산 중(속도 추정 데이터 부족)"
+                )}
+              </p>
+            ) : null}
           </div>
           <div className="geo-controls">
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={districtCacheLoading}
+              onClick={refreshDistrictCache}
+            >
+              {districtCacheLoading ? "로딩…" : "새로고침"}
+            </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={tmapFillStarting || Boolean(tmapFill?.active) || districtCacheLoading}
+              onClick={() => void onStartTmapFill()}
+            >
+              {tmapFill?.active ? "구별 TMAP 채우는 중…" : "누락 재조회(백그라운드)"}
+            </button>
+          </div>
+          {tmapFillErr ? <p className="err">{tmapFillErr}</p> : null}
+          {tmapFill?.active ? (
+            <p className="geo-meta" style={{ marginTop: 8 }}>
+              서버가 <code className="mono">fill_tmap_cache</code>를 반복 실행 중입니다. API_ERROR가 없어질 때까지(또는 상한) 돌립니다. 진행은
+              위 진행률·5초마다 자동 새로고침으로 확인하세요.
+            </p>
+          ) : null}
+          {!tmapFill?.active && tmapFill?.last && !tmapFill.last.empty ? (
+            <p className="geo-meta mono" style={{ marginTop: 6 }}>
+              마지막 배치 작업: {tmapFill.last.ok ? "완료(또는 API_ERROR 0)" : "중단/실패"} · 배치 수 {tmapFill.last.batches?.length ?? 0}
+              {tmapFill.last.error ? ` · ${tmapFill.last.error}` : ""}
+              {tmapFill.last.finished_at_utc
+                ? ` · 종료(UTC) ${new Date(tmapFill.last.finished_at_utc).toLocaleString("ko-KR", { timeZone: "UTC" })}`
+                : ""}
+            </p>
+          ) : null}
+        </div>
+        {districtCacheErr && <p className="err">{districtCacheErr}</p>}
+        {geoErr && <p className="err">{geoErr}</p>}
+        {geo && (
+          <p className="geo-meta mono" style={{ marginTop: 6 }}>
+            구간 OD(700m+): {geo.rows?.length ?? 0}행 · 정렬 {geoSortBy}/{geoSortDir} · offset {geoOffset} / limit {geoLimit}
+          </p>
+        )}
+        <div className="geo-table-wrap">
+          <table className="geo-table">
+            <thead>
+              <tr>
+                <th style={{ width: "16%" }}>구</th>
+                <th className="num">전체쌍</th>
+                <th className="num">총</th>
+                <th className="num">OK</th>
+                <th className="num">NO_PATH</th>
+                <th className="num">API_ERROR</th>
+                <th className="num">기타</th>
+                <th className="num">진행률</th>
+                <th style={{ width: 210 }}>마지막 기록(KST)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(districtCache?.rows ?? [])
+                .slice()
+                .sort((a, b) => String(a.gu ?? "").localeCompare(String(b.gu ?? ""), "ko"))
+                .map((r) => (
+                  <tr key={r.gu}>
+                    <td className="label">{r.gu}</td>
+                    <td className="num mono">{r.expected_pairs_total ?? "—"}</td>
+                    <td className="num mono">{r.total_rows ?? 0}</td>
+                    <td className="num mono">{r.ok_rows ?? 0}</td>
+                    <td className="num mono">{r.no_path_rows ?? 0}</td>
+                    <td className="num mono">{r.api_error_rows ?? 0}</td>
+                    <td className="num mono">{r.other_rows ?? 0}</td>
+                    <td className="num mono">
+                      {r.completion_ratio == null ? "—" : `${(r.completion_ratio * 100).toFixed(1)}%`}
+                    </td>
+                    <td className="mono">
+                      {r.last_written_at_utc
+                        ? new Date(r.last_written_at_utc).toLocaleString("ko-KR", {
+                            timeZone: "Asia/Seoul",
+                            month: "numeric",
+                            day: "numeric",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })
+                        : "—"}
+                    </td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <details className="panel geo-banner">
+        <summary className="panel-title">구별 TMAP raw 테이블 (상세)</summary>
+        <div className="geo-head" style={{ marginTop: 12 }}>
+          <p className="geo-meta">
+            `data/cache/tmap_by_district/{rawGu}_tmap_pairs.csv` 일부를 페이지로 보여줍니다. (API 호출 없이 로컬 파일 조회)
+          </p>
+          <div className="geo-controls">
             <label>
-              정렬
+              구
               <select
-                value={geoSortBy}
-                onChange={(e) => refreshGeo({ sortBy: e.target.value as "dist_m" | "trips", offset: 0 })}
+                value={rawGu}
+                onChange={(e) => {
+                  const gu = e.target.value;
+                  setRawGu(gu);
+                  refreshRawTable({ gu, offset: 0 });
+                }}
               >
-                <option value="dist_m">거리(m)</option>
-                <option value="trips">트립 수</option>
+                {(rawList.length ? rawList : [rawGu]).map((g) => (
+                  <option key={g} value={g}>
+                    {g}
+                  </option>
+                ))}
               </select>
             </label>
             <label>
-              방향
-              <select
-                value={geoSortDir}
-                onChange={(e) => refreshGeo({ sortDir: e.target.value as "asc" | "desc", offset: 0 })}
-              >
-                <option value="asc">오름차순</option>
-                <option value="desc">내림차순</option>
+              상태
+              <select value={rawStatus} onChange={(e) => refreshRawTable({ status: e.target.value, offset: 0 })}>
+                <option value="">전체</option>
+                <option value="OK">OK</option>
+                <option value="NO_PATH_OR_TOO_CLOSE">NO_PATH_OR_TOO_CLOSE</option>
+                <option value="API_ERROR">API_ERROR</option>
               </select>
             </label>
             <label>
               표시
               <input
                 type="number"
-                min={10}
-                max={5000}
-                value={geoLimit}
-                onChange={(e) => setGeoLimit(Number(e.target.value))}
-                onBlur={() => refreshGeo({ limit: Math.max(10, Math.min(5000, Math.floor(geoLimit) || 200)), offset: 0 })}
+                min={50}
+                max={2000}
+                value={rawLimit}
+                onChange={(e) => setRawLimit(Number(e.target.value))}
+                onBlur={() =>
+                  refreshRawTable({ limit: Math.max(50, Math.min(2000, Math.floor(rawLimit) || 200)), offset: 0 })
+                }
               />
             </label>
-            <button type="button" className="btn btn-ghost" onClick={() => refreshGeo({ offset: 0 })}>
-              새로고침
+            <button type="button" className="btn btn-ghost" disabled={rawLoading} onClick={() => refreshRawTable({ offset: 0 })}>
+              {rawLoading ? "로딩…" : "불러오기"}
             </button>
           </div>
         </div>
-        {geoErr && <p className="err">{geoErr}</p>}
+        {rawErr && <p className="err">{rawErr}</p>}
         <div className="geo-table-wrap">
           <table className="geo-table">
             <thead>
               <tr>
-                <th style={{ width: "55%" }}>OD</th>
-                <th className="num">거리(m)</th>
-                <th className="num">트립</th>
-                <th style={{ width: 110 }}>700m</th>
+                <th style={{ width: "24%" }}>a_id</th>
+                <th style={{ width: "24%" }}>b_id</th>
+                <th style={{ width: "14%" }}>status</th>
+                <th className="num">total(분)</th>
+                <th className="num">ride(분)</th>
+                <th className="num">dist(m)</th>
               </tr>
             </thead>
             <tbody>
-              {(geo?.rows ?? []).map((r) => (
-                <tr key={`${r.start_id}-${r.end_id}`} className={r.over_threshold ? "over" : ""}>
-                  <td className="label">{r.label}</td>
-                  <td className="num mono">{r.dist_m.toFixed(1)}</td>
-                  <td className="num mono">{r.trips}</td>
-                  <td className="mono">{r.over_threshold ? "초과" : "이하"}</td>
+              {(rawRows ?? []).map((r, i) => (
+                <tr key={`${r.a_id}-${r.b_id}-${i}`} className={r.transit_status !== "OK" ? "over" : ""}>
+                  <td className="mono">{r.a_id}</td>
+                  <td className="mono">{r.b_id}</td>
+                  <td className="mono">{r.transit_status}</td>
+                  <td className="num mono">{r.transit_total_min_1dp ?? "—"}</td>
+                  <td className="num mono">{r.transit_riding_min_1dp ?? "—"}</td>
+                  <td className="num mono">{r.transit_total_dist_m ?? "—"}</td>
                 </tr>
               ))}
             </tbody>
@@ -363,23 +659,19 @@ export default function App() {
           <button
             type="button"
             className="btn btn-ghost"
-            disabled={geoOffset <= 0}
-            onClick={() => refreshGeo({ offset: Math.max(0, geoOffset - geoLimit) })}
+            disabled={rawLoading || rawOffset <= 0}
+            onClick={() => refreshRawTable({ offset: Math.max(0, rawOffset - rawLimit) })}
           >
             이전
           </button>
           <span className="geo-meta mono">
-            offset {geoOffset} · limit {geoLimit}
+            offset {rawOffset} · limit {rawLimit}
           </span>
-          <button
-            type="button"
-            className="btn btn-ghost"
-            onClick={() => refreshGeo({ offset: geoOffset + geoLimit })}
-          >
+          <button type="button" className="btn btn-ghost" disabled={rawLoading} onClick={() => refreshRawTable({ offset: rawOffset + rawLimit })}>
             다음
           </button>
         </div>
-      </section>
+      </details>
       <section className="grid-stats">
         <div className="stat-card">
           <div className="label">비교 가능 트립</div>
@@ -459,7 +751,7 @@ export default function App() {
               checked={fetchIfMissing}
               onChange={(e) => setFetchIfMissing(e.target.checked)}
             />
-            캐시 없으면 ODsay 호출
+            캐시 없으면 TMAP 호출
           </label>
           <label>
             <input
@@ -484,7 +776,7 @@ export default function App() {
         <div className="batch-block">
           <h3 className="batch-title">이용 많은 출발·도착 쌍 일괄 갱신</h3>
           <p className="batch-hint">
-            trips.csv 기준 이용 횟수가 많은 순으로 N개 출발·도착 쌍에 대해 ODsay를
+            trips.csv 기준 이용 횟수가 많은 순으로 N개 출발·도착 쌍에 대해 TMAP을
             돌려 <span className="mono">transit_pairs.csv</span>를
             갱신합니다. 통계·차트 탭에 반영됩니다.
           </p>
@@ -520,8 +812,7 @@ export default function App() {
           {batchInfo && <p className="batch-ok">{batchInfo}</p>}
           {batchLast?.usage && (
             <p className="batch-ok mono">
-              갱신 후 누적 호출: {batchLast.usage.count}회 (KST{" "}
-              {batchLast.usage.kst_date})
+              갱신 후 누적 호출: {batchLast.usage.count}회
             </p>
           )}
         </div>

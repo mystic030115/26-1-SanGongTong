@@ -181,7 +181,7 @@ export default function ChartsPanel() {
         <section className="chart-section">
           <h3>전체 요약 (비교 가능 트립)</h3>
           <p className="chart-desc">
-            같은 출발·도착 쌍에 대해 ODsay 총시간과 따릉이 이용시간을 둘 다 알 때만
+            같은 출발·도착 쌍에 대해 TMAP 총시간과 따릉이 이용시간을 둘 다 알 때만
             집계합니다.
           </p>
           {pieData.length === 0 ? (
@@ -452,9 +452,9 @@ export default function ChartsPanel() {
       </section>
 
       <details className="charts-details">
-        <summary>진단 · ODsay 응답·경로 구성 (펼치기)</summary>
+        <summary>진단 · TMAP 응답·경로 구성 (펼치기)</summary>
         <section className="chart-section chart-section-nested">
-          <h3>ODsay 응답 상태 (트립 행 기준)</h3>
+          <h3>TMAP 응답 상태 (트립 행 기준)</h3>
           <div className="chart-box">
             <ResponsiveContainer width="100%" height={280}>
               <BarChart data={statusBar} margin={{ bottom: 60, left: 8 }}>

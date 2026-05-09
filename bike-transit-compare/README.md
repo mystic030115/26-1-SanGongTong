@@ -1,6 +1,6 @@
 # bike-transit-compare
 
-자전거(따릉이) 이동 데이터와 대중교통(ODsay) 경로·시간을 비교하는 프로젝트입니다.
+자전거(따릉이) 이동 데이터와 대중교통(TMAP) 경로·시간을 비교하는 프로젝트입니다.
 
 **두 가지 사용 방식이 있습니다.**
 
@@ -28,10 +28,10 @@ pip install -r requirements.txt
 
 ### 2. API 키
 
-프로젝트 루트에 `.env` 파일을 만들고 ODsay 키를 넣습니다.
+프로젝트 루트에 `.env` 파일을 만들고 TMAP 앱 키를 넣습니다.
 
 ```env
-ODsay_API_KEY=여기에_키
+TMAP_APP_KEY=여기에_키
 ```
 
 ### 3. 원시 데이터
@@ -66,7 +66,7 @@ npm install
 
 1. `python3 -m venv .venv && source .venv/bin/activate`
 2. `pip install -r requirements.txt`
-3. `.env`에 `ODsay_API_KEY=...`
+3. `.env`에 `TMAP_APP_KEY=...`
 4. `data/raw/`에 `trips.csv`, `stations.xlsx`
 5. 웹 UI 사용 시: `cd frontend && npm install`
 
@@ -171,25 +171,25 @@ taskkill /PID 번호 /F
 
 | 위치 | 내용 |
 |------|------|
-| `data/logs/journal_YYYY-MM-DD.jsonl` | 하루 한 파일, **JSON 한 줄당 이벤트** (ODsay HTTP 결과·요청/HTTP 오류, `build_pair_cache` 완료, 웹에서 출발·도착 조회 시 ODsay 호출, 상위 N 배치 갱신 등) |
+| `data/logs/journal_YYYY-MM-DD.jsonl` | 하루 한 파일, **JSON 한 줄당 이벤트** (TMAP HTTP 결과·요청/HTTP 오류, `build_pair_cache` 완료, 웹에서 출발·도착 조회 시 TMAP 호출, 상위 N 배치 갱신 등) |
 | `data/output/last_run_summary.json` | `python -m src.run` 이 **정상 종료될 때마다** 마지막 실행 요약 |
-| `data/cache/odsay_usage.json` | KST 기준 당일 ODsay HTTP 호출 누적(자정 리셋) |
+| `data/cache/tmap_usage.json` | KST 기준 당일 TMAP HTTP 호출 누적(자정 리셋) |
 | `data/cache/transit_pairs.csv` | 출발·도착 쌍별 대중교통 캐시 |
 | `data/output/trips_with_transit.xlsx` | 배치 병합 결과 |
 
-`.gitignore`에 `data/logs/` 와 `odsay_usage.json` 을 넣어 두었습니다. 로그를 저장소에 올리고 싶으면 `.gitignore`에서 해당 줄을 지우면 됩니다.
+`.gitignore`에 `data/logs/` 와 `tmap_usage.json` 을 넣어 두었습니다. 로그를 저장소에 올리고 싶으면 `.gitignore`에서 해당 줄을 지우면 됩니다.
 
 ---
 
 ## 디렉터리 구조
 
 - `data/raw/` — `trips.csv`, `stations.xlsx`
-- `data/cache/` — `transit_pairs.csv`, `odsay_usage.json`
+- `data/cache/` — `transit_pairs.csv`, `tmap_usage.json`
 - `data/logs/` — `journal_*.jsonl`
 - `data/output/` — `trips_with_transit.xlsx`, `last_run_summary.json`
 - `src/run.py` — 배치 파이프라인
 - `src/web_api.py` — 로컬 HTTP API
 - `src/app_journal.py` — 일지·요약 파일 기록
-- `src/odsay_usage.py` — 일별 ODsay 호출 카운트
+- `src/tmap_usage.py` — 일별 TMAP 호출 카운트
 - `frontend/` — Vite + React + TypeScript UI (`MapPanel.tsx` — Leaflet 지도 탭)
 - `scripts/` — `run_batch.sh`, `run_web_api.sh`, `run_frontend.sh`

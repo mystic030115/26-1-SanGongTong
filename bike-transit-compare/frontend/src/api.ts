@@ -44,13 +44,199 @@ export async function fetchStats(): Promise<GlobalStats> {
 
 export type OdsayUsage = {
   count: number;
-  kst_date: string;
-  next_reset_kst: string;
+  by_file?: Record<string, number>;
+  last_updated_utc?: string;
 };
 
 export async function fetchOdsayUsage(): Promise<OdsayUsage> {
   const r = await fetch("/api/usage");
   if (!r.ok) throw new Error("사용량 로드 실패");
+  return r.json();
+}
+
+export type TmapByDistrictSummaryRow = {
+  gu: string;
+  file: string;
+  total_rows: number;
+  ok_rows: number;
+  no_path_rows: number;
+  api_error_rows: number;
+  other_rows: number;
+  expected_pairs_total?: number | null;
+  completion_ratio?: number | null;
+  ok_ratio?: number | null;
+  /** 총 CSV 행 수 / 기대쌍(재시도로 행만 많을 때 참고) */
+  rows_per_expected_ratio?: number | null;
+  last_written_at_utc?: string | null;
+};
+
+export type TmapByDistrictSummary = {
+  dir: string;
+  rows: TmapByDistrictSummaryRow[];
+  overall?: {
+    expected_pairs_total_sum?: number | null;
+    cached_rows_sum?: number;
+    ok_rows_sum?: number;
+    completion_ratio?: number | null;
+    eta?: {
+      rows_per_min?: number | null;
+      eta_minutes?: number | null;
+      eta_finish_at_kst?: string | null;
+      window_sec?: number | null;
+    };
+  };
+};
+
+export async function fetchTmapByDistrictSummary(): Promise<TmapByDistrictSummary> {
+  const r = await fetch("/api/tmap-by-district/summary");
+  if (!r.ok) throw new Error("구별 TMAP 캐시 요약 로드 실패");
+  return r.json();
+}
+
+export type TmapFillBatchRow = {
+  batch_index: number;
+  returncode: number;
+  api_error_rows_sum: number;
+  completion_ratio?: number | null;
+  ok_rows_sum?: number | null;
+  expected_pairs_total_sum?: number | null;
+};
+
+export type TmapFillLast = {
+  empty?: boolean;
+  ok?: boolean;
+  batches?: TmapFillBatchRow[];
+  error?: string | null;
+  finished_at_utc?: string;
+};
+
+export type TmapFillStatus = {
+  active: boolean;
+  last: TmapFillLast;
+};
+
+export async function fetchTmapFillStatus(): Promise<TmapFillStatus> {
+  const r = await fetch("/api/tmap-by-district/fill-status");
+  if (!r.ok) throw new Error("TMAP 채움 상태 로드 실패");
+  return r.json();
+}
+
+export type TmapFillStartParams = {
+  workers?: number;
+  pair_workers?: number;
+  max_batches?: number;
+  sleep_sec_between_batches?: number;
+  single_pass?: boolean;
+};
+
+export async function postTmapFillUntilComplete(
+  params?: TmapFillStartParams
+): Promise<{ ok: boolean; started: boolean; message?: string; params?: TmapFillStartParams }> {
+  const r = await fetch("/api/tmap-by-district/fill-until-complete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params ?? {}),
+  });
+  if (r.status === 409) throw new Error("이미 TMAP 구별 채움이 실행 중입니다.");
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export type GuFactorRow = {
+  gu: string;
+  factor: string;
+  value: number;
+  unit?: string;
+  source?: string;
+  year?: string;
+};
+
+export type FactorsTable = {
+  empty: boolean;
+  csv: string;
+  rows: GuFactorRow[];
+  meta?: any;
+};
+
+export type FactorsCorrelationRow = {
+  factor: string;
+  category: string;
+  target: "f1" | "depth_pct" | "coverage_pct";
+  n: number;
+  pearson_r: number | null;
+  spearman_r: number | null;
+};
+
+export type FactorsAnalysis = {
+  empty: boolean;
+  coverage_thr_pct: number;
+  targets_n?: number;
+  factors_n?: number;
+  corr_rows?: FactorsCorrelationRow[];
+  factor_corr?: { factors: string[]; matrix: number[][] };
+  vif?: { factor: string; vif: number; r2: number }[];
+  meta?: any;
+  error?: string;
+};
+
+export async function fetchFactorsTable(): Promise<FactorsTable> {
+  const r = await fetch("/api/factors/table");
+  if (!r.ok) throw new Error("요인 테이블 로드 실패");
+  return r.json();
+}
+
+export async function fetchFactorsAnalysis(coverageThrPct: number): Promise<FactorsAnalysis> {
+  const q = new URLSearchParams({ coverage_thr_pct: String(coverageThrPct) });
+  const r = await fetch(`/api/factors/analysis?${q}`);
+  if (!r.ok) throw new Error("요인 분석 로드 실패");
+  return r.json();
+}
+
+export type F1HomogeneityByGuRow = {
+  gu: string;
+  depth_pct: number;
+  coverage_pct: number;
+  f1: number;
+};
+
+export type F1HomogeneityTest = {
+  empty: boolean;
+  error?: string;
+  alpha?: number;
+  coverage_thr_pct?: number;
+  /** trip_label_randomization | bootstrap_f1_iid (trip 풀 부족 시 보조) */
+  test_mode?: string;
+  observed?: {
+    var_f1: number;
+    districts_n: number;
+    mean_f1?: number;
+    by_gu?: F1HomogeneityByGuRow[];
+  };
+  null?: { mc_sims: number; sample_n: number; var_f1_mean: number; var_f1_p95: number };
+  p_value?: number;
+  reject_h0?: boolean;
+  h0?: string;
+  h0_ko?: string;
+  h1_ko?: string;
+  test_stat?: string;
+  note?: string;
+  method_ko?: string;
+};
+
+export async function fetchF1HomogeneityTest(opts: {
+  coverageThrPct: number;
+  alpha?: number;
+  mcSims?: number;
+  sampleN?: number;
+}): Promise<F1HomogeneityTest> {
+  const q = new URLSearchParams({
+    coverage_thr_pct: String(opts.coverageThrPct),
+    alpha: String(opts.alpha ?? 0.05),
+    mc_sims: String(opts.mcSims ?? 500),
+    sample_n: String(opts.sampleN ?? 30000),
+  });
+  const r = await fetch(`/api/f1/homogeneity-test?${q}`);
+  if (!r.ok) throw new Error("F1 균일성 검정 로드 실패");
   return r.json();
 }
 

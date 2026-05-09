@@ -1,0 +1,40 @@
+{
+  "generated_by": "scripts/build_gu_factors.py",
+  "notes": [
+    "소가설2(상관 분석)용 외부 요인 데이터의 1차 버전입니다.",
+    "현재는 공개적으로 즉시 확보 가능한 인구/면적(위키) + 지리(구 centroid)부터 포함했습니다.",
+    "소득/불평등/외국인비율/고령화비율 등은 공개 파일 다운로드 경로를 추가로 확정하면 같은 포맷으로 확장합니다."
+  ],
+  "factors": {
+    "population_total": {
+      "category": "population",
+      "why": "구별 수요 규모(잠재 이용자 수)를 나타내는 기본 변수입니다.",
+      "source": "https://ko.wikipedia.org/wiki/%EC%84%9C%EC%9A%B8%ED%8A%B9%EB%B3%84%EC%8B%9C%EC%9D%98_%ED%96%89%EC%A0%95_%EA%B5%AC%EC%97%AD",
+      "year": "2022-05"
+    },
+    "population_density_per_km2": {
+      "category": "population",
+      "why": "밀집도는 따릉이 이동의 경쟁력(단거리/혼잡/정차 비용)에 영향을 줄 수 있어 설명변수로 유효합니다.",
+      "source": "https://ko.wikipedia.org/wiki/%EC%84%9C%EC%9A%B8%ED%8A%B9%EB%B3%84%EC%8B%9C%EC%9D%98_%ED%96%89%EC%A0%95_%EA%B5%AC%EC%97%AD",
+      "year": "2022-05"
+    },
+    "dist_to_cityhall_km": {
+      "category": "geo",
+      "why": "도심 접근성(중심부와의 거리)은 통근/이동 패턴과 따릉이 절약효과 분포에 영향을 줄 수 있습니다.",
+      "source": "computed_from_centroid",
+      "year": "2013"
+    },
+    "registered_foreigners_ratio_pct": {
+      "category": "population",
+      "why": "외국인 거주 비율은 직주 패턴/고용 구조/생활권 특성 등과 연결될 수 있어, 절약효과(F1)가 구별로 '균일하지 않다'는 가설을 설명하는 인구·사회적 요인으로 사용합니다.",
+      "source": {
+        "registered_foreigners_total": "https://www.immigration.go.kr/bbs/immigration/227/600059/artclView.do",
+        "population_total": "https://ko.wikipedia.org/wiki/%EC%84%9C%EC%9A%B8%ED%8A%B9%EB%B3%84%EC%8B%9C%EC%9D%98_%ED%96%89%EC%A0%95_%EA%B5%AC%EC%97%AD"
+      },
+      "year": "2025-09-30",
+      "notes": [
+        "등록외국인=출입국관리법상 90일 초과 장기체류자 중 등록자(법무부 통계). 실제 체류/거주 외국인 전체와는 차이가 있을 수 있습니다."
+      ]
+    }
+  }
+}

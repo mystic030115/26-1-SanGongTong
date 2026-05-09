@@ -1,3 +1,9 @@
+# secrets
+.env
+
 # 로컬 일지·사용량 (원하면 커밋에서 제외)
 data/logs/
 data/cache/odsay_usage.json
+data/cache/tmap_usage.json
+# TMAP cache fill in-progress markers
+data/cache/tmap_by_district/*.filling
