@@ -4,3 +4,4 @@ requests
 python-dotenv
 fastapi
 uvicorn[standard]
+scipy>=1.10.0

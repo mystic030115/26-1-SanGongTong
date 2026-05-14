@@ -28,6 +28,12 @@ load_dotenv(ROOT / ".env")
 TMAP_APP_KEY = os.getenv("TMAP_APP_KEY")
 TMAP_TRANSIT_URL = "https://apis.openapi.sk.com/transit/routes"
 
+
+def _tmap_http_disabled() -> bool:
+    """TMAP_DISABLED=1(또는 true/yes/on)이면 SK TMAP으로 HTTP를 보내지 않습니다."""
+    v = (os.getenv("TMAP_DISABLED") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
 DATA_RAW = ROOT / "data" / "raw"
 DATA_CACHE = ROOT / "data" / "cache"
 DATA_OUT = ROOT / "data" / "output"
@@ -260,6 +266,17 @@ def _tmap_journal_return(ck: tuple, out: dict) -> dict:
 
 def fetch_transit_time(start_lon, start_lat, end_lon, end_lat):
     ck = od_coord_key(start_lon, start_lat, end_lon, end_lat)
+    if _tmap_http_disabled():
+        return _tmap_journal_return(
+            ck,
+            {
+                "transit_total_min": pd.NA,
+                "transit_riding_min": pd.NA,
+                "transit_total_dist_m": pd.NA,
+                "transit_status": "API_ERROR",
+                "api_detail": "TMAP HTTP disabled (TMAP_DISABLED=1 in .env or environment)",
+            },
+        )
     if not TMAP_APP_KEY:
         return _tmap_journal_return(
             ck,

@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from scipy import stats as scipy_stats
 import os
 import csv as _csv
 from pathlib import Path
@@ -1672,6 +1673,21 @@ def factors_analysis(
             y = sub[tgt].to_numpy(dtype=float)
             pr = float(np.corrcoef(x, y)[0, 1])
             sr = _spearman(x, y)
+            pearson_p: float | None = None
+            spearman_p: float | None = None
+            n_sub = int(len(sub))
+            if n_sub >= 3 and np.isfinite(pr):
+                try:
+                    _, pearson_p = scipy_stats.pearsonr(x, y)
+                    pearson_p = float(pearson_p) if np.isfinite(pearson_p) else None
+                except Exception:
+                    pearson_p = None
+            if n_sub >= 3 and sr is not None and np.isfinite(sr):
+                try:
+                    _, spearman_p = scipy_stats.spearmanr(x, y)
+                    spearman_p = float(spearman_p) if np.isfinite(spearman_p) else None
+                except Exception:
+                    spearman_p = None
             m = factor_meta.get(c) if isinstance(factor_meta, dict) else None
             raw_cat = (m.get("category") if isinstance(m, dict) else None)
             cat0 = str(raw_cat).strip().lower() if raw_cat else ""
@@ -1681,9 +1697,11 @@ def factors_analysis(
                     "factor": c,
                     "category": cat,
                     "target": tgt,
-                    "n": int(len(sub)),
+                    "n": n_sub,
                     "pearson_r": float(pr) if np.isfinite(pr) else None,
+                    "pearson_p": pearson_p,
                     "spearman_r": float(sr) if (sr is not None and np.isfinite(sr)) else None,
+                    "spearman_p": spearman_p,
                 }
             )
 
@@ -1705,11 +1723,38 @@ def factors_analysis(
         if len(complete) >= min_complete and complete.shape[1] >= 2:
             vif_rows = _vif_table(complete)
 
+    # 가설 1과 동일한 구별 F1 산술평균이 운영 임계(0.25)를 넘는지에 대한 보조 통계
+    # (구를 i.i.d. 표본으로 보는 단순화; 해석은 보고서에 한 줄 부연 권장)
+    f1_vals = targets["f1"].to_numpy(dtype=float)
+    f1_mean = float(np.mean(f1_vals)) if len(f1_vals) else None
+    mean_f1_stats: dict[str, Any] | None = None
+    f1_threshold = 0.25
+    if f1_mean is not None and len(f1_vals) >= 2 and np.all(np.isfinite(f1_vals)):
+        t_res = scipy_stats.ttest_1samp(f1_vals, f1_threshold, alternative="greater")
+        rng = np.random.default_rng(42)
+        b = 5000
+        boot_means = np.empty(b, dtype=float)
+        n_f = len(f1_vals)
+        for i in range(b):
+            idx = rng.integers(0, n_f, size=n_f)
+            boot_means[i] = float(np.mean(f1_vals[idx]))
+        ci_low, ci_high = float(np.percentile(boot_means, 2.5)), float(np.percentile(boot_means, 97.5))
+        mean_f1_stats = {
+            "n_gu": int(len(f1_vals)),
+            "mean_f1": f1_mean,
+            "threshold_f1": f1_threshold,
+            "t_stat": float(t_res.statistic) if np.isfinite(t_res.statistic) else None,
+            "p_value_mean_gt_threshold_t": float(t_res.pvalue) if np.isfinite(t_res.pvalue) else None,
+            "bootstrap_b": b,
+            "bootstrap_mean_ci95": [ci_low, ci_high],
+        }
+
     return {
         "empty": False,
         "coverage_thr_pct": int(coverage_thr_pct),
         "targets_n": int(len(targets)),
         "factors_n": int(len(factor_cols)),
+        "mean_f1_stats": mean_f1_stats,
         "corr_rows": corr_rows,
         "factor_corr": {
             "factors": list(corr_mat.columns),
@@ -1727,12 +1772,136 @@ def _f1_from_depth_coverage(depth_pct: float, coverage_pct: float) -> float:
     return float((2 * d * c / s) if s > 0 else 0.0)
 
 
+def _max_mtime_glob(dir_path: Path, pattern: str) -> int:
+    mx = 0
+    try:
+        for p in dir_path.glob(pattern):
+            try:
+                mx = max(mx, int(p.stat().st_mtime))
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return mx
+
+
+# (coverage_thr, od_mtime, tmap_mtime) -> (w, trans, diffpos, hit) float32 arrays — OD/TMAP 전역 스캔 1회만
+_F1_HOMO_TRIP_POOL: dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+
+
+def _load_f1_homogeneity_trip_arrays(
+    coverage_thr_pct: int, od_dir: Path, tmap_dir: Path
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """OD + 구별 TMAP OK 캐시에서 풀 관측치(transit, diffpos+, hit, weight)를 numpy로 적재."""
+    key = (
+        int(coverage_thr_pct),
+        _max_mtime_glob(od_dir, "*.csv"),
+        _max_mtime_glob(tmap_dir, "*_tmap_pairs.csv"),
+    )
+    cached = _F1_HOMO_TRIP_POOL.get(key)
+    if cached is not None:
+        return cached
+
+    trans: list[float] = []
+    diffpos: list[float] = []
+    hitl: list[float] = []
+    wts: list[float] = []
+
+    def _pair_key(a: str, b: str) -> tuple[str, str]:
+        return (a, b) if a < b else (b, a)
+
+    def _ratio_hit(transit_min: float, bike_min: float, thr: int) -> float:
+        if transit_min <= 0:
+            return 0.0
+        d = (transit_min - bike_min) / transit_min * 100.0
+        return 1.0 if d >= float(thr) else 0.0
+
+    def _clean_header(s: str) -> str:
+        return (s or "").replace("\ufeff", "").strip()
+
+    def _pick_field(fieldnames: list[str], want: str) -> str:
+        m = {_clean_header(f): f for f in fieldnames}
+        k = _clean_header(want)
+        if k not in m:
+            raise ValueError(f"missing column '{want}'")
+        return m[k]
+
+    for fp in sorted([p for p in od_dir.glob("*.csv") if p.is_file()]):
+        gu = fp.stem.replace("_시간_거리", "")
+        cache_path = tmap_dir / f"{gu}_tmap_pairs.csv"
+        if not cache_path.exists():
+            continue
+        tmap: dict[tuple[str, str], float] = {}
+        try:
+            with open(cache_path, "r", encoding="utf-8", newline="") as f:
+                r = _csv.DictReader(f)
+                if not r.fieldnames:
+                    continue
+                ak = _pick_field(r.fieldnames, "a_id")
+                bk = _pick_field(r.fieldnames, "b_id")
+                tk = _pick_field(r.fieldnames, "transit_total_min_1dp")
+                sk = _pick_field(r.fieldnames, "transit_status")
+                for row in r:
+                    if (row.get(sk) or "").strip() != "OK":
+                        continue
+                    a = (row.get(ak) or "").strip()
+                    b = (row.get(bk) or "").strip()
+                    if not a or not b or a == b:
+                        continue
+                    try:
+                        t = float((row.get(tk) or "").strip())
+                    except Exception:
+                        continue
+                    tmap[_pair_key(a, b)] = t
+        except Exception:
+            continue
+
+        try:
+            with open(fp, "r", encoding="utf-8", newline="") as f:
+                r = _csv.DictReader(f)
+                if not r.fieldnames:
+                    continue
+                sk = _pick_field(r.fieldnames, "시작_대여소_ID")
+                ek = _pick_field(r.fieldnames, "종료_대여소_ID")
+                bk = _pick_field(r.fieldnames, "전체_이용_분")
+                wk = _pick_field(r.fieldnames, "빈도")
+                for row in r:
+                    a = (row.get(sk) or "").strip()
+                    b = (row.get(ek) or "").strip()
+                    if not a or not b or a == b:
+                        continue
+                    try:
+                        bike_min = float((row.get(bk) or "").strip())
+                        w = float((row.get(wk) or "").strip())
+                    except Exception:
+                        continue
+                    if not np.isfinite(w) or w <= 0:
+                        continue
+                    t = tmap.get(_pair_key(a, b))
+                    if t is None or not np.isfinite(t):
+                        continue
+                    dpos = max(float(t) - float(bike_min), 0.0)
+                    trans.append(float(t))
+                    diffpos.append(dpos)
+                    hitl.append(_ratio_hit(float(t), float(bike_min), int(coverage_thr_pct)))
+                    wts.append(float(w))
+        except Exception:
+            continue
+
+    w = np.array(wts, dtype=np.float64)
+    ta = np.array(trans, dtype=np.float64)
+    da = np.array(diffpos, dtype=np.float64)
+    ha = np.array(hitl, dtype=np.float64)
+    _F1_HOMO_TRIP_POOL[key] = (w, ta, da, ha)
+    return w, ta, da, ha
+
+
 @app.get("/api/f1/homogeneity-test")
 def f1_homogeneity_test(
     coverage_thr_pct: int = Query(20, ge=0, le=95),
     alpha: float = Query(0.05, gt=0.0, lt=1.0),
-    mc_sims: int = Query(500, ge=100, le=5000),
-    sample_n: int = Query(30000, ge=5000, le=200000),
+    mc_sims: int = Query(250, ge=80, le=5000),
+    sample_n: int = Query(10000, ge=3000, le=200000),
     random_seed: int = Query(42, ge=0, le=2**31 - 1),
     min_pooled_observations: int = Query(800, ge=200, le=500000),
 ):
@@ -1812,96 +1981,8 @@ def f1_homogeneity_test(
     if not tmap_dir.exists():
         raise HTTPException(404, f"TMAP dir not found: {tmap_dir}")
 
-    # Read trip-rows; keep only rows with matched TMAP OK
-    # Observation attributes for aggregation:
-    # - transit_min, diff_pos_min, hit(threshold), weight
-    trans: list[float] = []
-    diffpos: list[float] = []
-    hit: list[float] = []
-    wts: list[float] = []
-
-    def _pair_key(a: str, b: str) -> tuple[str, str]:
-        return (a, b) if a < b else (b, a)
-
-    def _ratio_hit(transit_min: float, bike_min: float, thr: int) -> float:
-        if transit_min <= 0:
-            return 0.0
-        d = (transit_min - bike_min) / transit_min * 100.0
-        return 1.0 if d >= float(thr) else 0.0
-
-    # We'll parse OD csv headers the same way as build_district_savings.py
-    def _clean_header(s: str) -> str:
-        return (s or "").replace("\ufeff", "").strip()
-
-    def _pick_field(fieldnames: list[str], want: str) -> str:
-        m = {_clean_header(f): f for f in fieldnames}
-        k = _clean_header(want)
-        if k not in m:
-            raise ValueError(f"missing column '{want}'")
-        return m[k]
-
-    for fp in sorted([p for p in od_dir.glob("*.csv") if p.is_file()]):
-        gu = fp.stem.replace("_시간_거리", "")
-        cache_path = tmap_dir / f"{gu}_tmap_pairs.csv"
-        if not cache_path.exists():
-            continue
-        # load TMAP OK map (undirected)
-        tmap = {}
-        try:
-            with open(cache_path, "r", encoding="utf-8", newline="") as f:
-                r = _csv.DictReader(f)
-                if not r.fieldnames:
-                    continue
-                ak = _pick_field(r.fieldnames, "a_id")
-                bk = _pick_field(r.fieldnames, "b_id")
-                tk = _pick_field(r.fieldnames, "transit_total_min_1dp")
-                sk = _pick_field(r.fieldnames, "transit_status")
-                for row in r:
-                    if (row.get(sk) or "").strip() != "OK":
-                        continue
-                    a = (row.get(ak) or "").strip()
-                    b = (row.get(bk) or "").strip()
-                    if not a or not b or a == b:
-                        continue
-                    try:
-                        t = float((row.get(tk) or "").strip())
-                    except Exception:
-                        continue
-                    tmap[_pair_key(a, b)] = t
-        except Exception:
-            continue
-
-        try:
-            with open(fp, "r", encoding="utf-8", newline="") as f:
-                r = _csv.DictReader(f)
-                if not r.fieldnames:
-                    continue
-                sk = _pick_field(r.fieldnames, "시작_대여소_ID")
-                ek = _pick_field(r.fieldnames, "종료_대여소_ID")
-                bk = _pick_field(r.fieldnames, "전체_이용_분")
-                wk = _pick_field(r.fieldnames, "빈도")
-                for row in r:
-                    a = (row.get(sk) or "").strip()
-                    b = (row.get(ek) or "").strip()
-                    if not a or not b or a == b:
-                        continue
-                    try:
-                        bike_min = float((row.get(bk) or "").strip())
-                        w = float((row.get(wk) or "").strip())
-                    except Exception:
-                        continue
-                    if not np.isfinite(w) or w <= 0:
-                        continue
-                    t = tmap.get(_pair_key(a, b))
-                    if t is None or not np.isfinite(t):
-                        continue
-                    dpos = max(float(t) - float(bike_min), 0.0)
-                    trans.append(float(t))
-                    diffpos.append(dpos)
-                    hit.append(_ratio_hit(float(t), float(bike_min), int(coverage_thr_pct)))
-                    wts.append(float(w))
-        except Exception:
-            continue
+    w, trans_a, diffpos_a, hit_a = _load_f1_homogeneity_trip_arrays(int(coverage_thr_pct), od_dir, tmap_dir)
+    wts_len = int(w.shape[0])
 
     min_pool = int(min_pooled_observations)
     rng = np.random.default_rng(int(random_seed))
@@ -1945,7 +2026,7 @@ def f1_homogeneity_test(
             "method_ko": method_ko,
         }
 
-    if len(wts) < min_pool:
+    if wts_len < min_pool:
         # Trip-level 풀이 부족할 때: 구별 F1 벡터에 대한 부트스트랩 귀무(교환가능·단일 모집단)로 Var 분포를 근사.
         n_gu = int(obs_f1.size)
         null_stats_fb: list[float] = []
@@ -1961,7 +2042,7 @@ def f1_homogeneity_test(
             note="Bootstrap variance under exchangeable district F1 (fallback when pooled TMAP-matched trips < min_pooled_observations).",
             method_ko=(
                 "관측: district_savings.json과 동일한 정의로 구별 Depth·Coverage→F1을 구한 뒤 Var(F1)을 씁니다. "
-                f"OD·TMAP OK로 맞춘 trip 풀 표본이 {len(wts)}건으로, 경로 수준 귀무 시뮬레이션에 권장 최소({min_pool}건)에 못 미칩니다. "
+                f"OD·TMAP OK로 맞춘 trip 풀 표본이 {wts_len}건으로, 경로 수준 귀무 시뮬레이션에 권장 최소({min_pool}건)에 못 미칩니다. "
                 f"대신 구별 F1 {n_gu}개를 경험분포에서 복원추출해 Var(F1)을 반복 계산하는 부트스트랩({int(mc_sims)}회)으로 "
                 "p = P(null Var ≥ 관측 Var)를 추정합니다. "
                 "이 귀무는 ‘모든 구가 동일한 F1 분포에서 독립적으로 나왔다’에 가깝고, 경로 구조 차이는 반영하지 못하므로 탐색·보조 해석에 한정하세요."
@@ -1969,8 +2050,14 @@ def f1_homogeneity_test(
             null_sample_n=n_gu,
         )
 
-    w = np.array(wts, dtype=float)
-    p = w / float(np.sum(w))
+    w_sum = float(np.sum(w))
+    if not np.isfinite(w_sum) or w_sum <= 0:
+        return {
+            "empty": True,
+            "error": "trip 풀 가중치 합이 비정상입니다.",
+            "coverage_thr_pct": int(coverage_thr_pct),
+        }
+    p = w / w_sum
 
     # district size proportions based on matched_weight_by_gu from savings payload
     gu_weights = {k: float(v) for k, v in matched_w_by_gu.items() if v is not None and float(v) > 0}
@@ -1979,18 +2066,17 @@ def f1_homogeneity_test(
         return {"empty": True, "error": "구별 matched_weight 정보가 부족합니다.", "coverage_thr_pct": int(coverage_thr_pct)}
     gw = np.array([gu_weights[g] for g in gu_list], dtype=float)
     gw = gw / float(np.sum(gw))
+    # MC 1회당 표본 크기 상한(응답 시간·프록시 타임아웃 방지) — 요청 sample_n은 이 값으로 캡
+    eff_n = min(int(sample_n), 12000)
+    eff_n = max(eff_n, 4000)
     # fixed counts per district for each simulation
-    counts = np.floor(gw * float(sample_n)).astype(int)
-    # adjust to sum exactly sample_n
-    rem = int(sample_n - int(np.sum(counts)))
+    counts = np.floor(gw * float(eff_n)).astype(int)
+    # adjust to sum exactly eff_n
+    rem = int(eff_n - int(np.sum(counts)))
     if rem > 0:
         add_idx = rng.choice(len(counts), size=rem, replace=True, p=gw)
         for i in add_idx:
             counts[i] += 1
-
-    trans_a = np.array(trans, dtype=float)
-    diffpos_a = np.array(diffpos, dtype=float)
-    hit_a = np.array(hit, dtype=float)
 
     def _stat_from_sample(idx: np.ndarray) -> float:
         # draw pooled observations then assign random labels by partitioning
@@ -2015,8 +2101,9 @@ def f1_homogeneity_test(
         return float(np.var(np.array(f1s, dtype=float), ddof=0))
 
     null_stats: list[float] = []
+    pool_n = int(w.shape[0])
     for _ in range(int(mc_sims)):
-        idx = rng.choice(len(w), size=int(sample_n), replace=True, p=p)
+        idx = rng.choice(pool_n, size=int(eff_n), replace=True, p=p)
         null_stats.append(_stat_from_sample(idx))
 
     null_arr = np.array(null_stats, dtype=float)
@@ -2030,9 +2117,10 @@ def f1_homogeneity_test(
         method_ko=(
             "관측: district_savings.json과 동일한 정의로 구별 Depth·Coverage→F1을 구한 뒤 Var(F1)을 씁니다. "
             "귀무: OD·TMAP OK 경로를 풀에서 가중 복원추출한 뒤, 구별 matched 가중 비율로 표본을 구에 무작위 할당해 F1을 다시 계산합니다. "
-            f"이 과정을 {int(mc_sims)}회 반복해 Var(F1)의 귀무 분포를 근사하고, p = P(null Var ≥ 관측 Var)입니다."
+            f"이 과정을 {int(mc_sims)}회 반복해 Var(F1)의 귀무 분포를 근사하고, p = P(null Var ≥ 관측 Var)입니다. "
+            f"(응답 시간을 위해 MC 표본 크기는 요청값과 무관하게 최대 {eff_n}건으로 캡합니다.)"
         ),
-        null_sample_n=int(sample_n),
+        null_sample_n=int(eff_n),
     )
 
 

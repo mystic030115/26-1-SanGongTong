@@ -164,7 +164,22 @@ export type FactorsCorrelationRow = {
   target: "f1" | "depth_pct" | "coverage_pct";
   n: number;
   pearson_r: number | null;
+  /** H0: ρ=0 (Pearson), 양측 */
+  pearson_p?: number | null;
   spearman_r: number | null;
+  /** H0: ρ=0 (Spearman rank), 양측 */
+  spearman_p?: number | null;
+};
+
+export type MeanF1Stats = {
+  n_gu: number;
+  mean_f1: number;
+  threshold_f1: number;
+  t_stat: number | null;
+  /** 단측 t: 구별 F1 평균 > threshold (구를 i.i.d.로 둔 단순화) */
+  p_value_mean_gt_threshold_t: number | null;
+  bootstrap_b: number;
+  bootstrap_mean_ci95: [number, number];
 };
 
 export type FactorsAnalysis = {
@@ -172,6 +187,7 @@ export type FactorsAnalysis = {
   coverage_thr_pct: number;
   targets_n?: number;
   factors_n?: number;
+  mean_f1_stats?: MeanF1Stats | null;
   corr_rows?: FactorsCorrelationRow[];
   factor_corr?: { factors: string[]; matrix: number[][] };
   vif?: { factor: string; vif: number; r2: number }[];
@@ -228,14 +244,21 @@ export async function fetchF1HomogeneityTest(opts: {
   alpha?: number;
   mcSims?: number;
   sampleN?: number;
+  /** 브라우저가 지원하면 fetch 타임아웃(ms). 기본 180s. */
+  timeoutMs?: number;
 }): Promise<F1HomogeneityTest> {
   const q = new URLSearchParams({
     coverage_thr_pct: String(opts.coverageThrPct),
     alpha: String(opts.alpha ?? 0.05),
-    mc_sims: String(opts.mcSims ?? 500),
-    sample_n: String(opts.sampleN ?? 30000),
+    mc_sims: String(opts.mcSims ?? 250),
+    sample_n: String(opts.sampleN ?? 10000),
   });
-  const r = await fetch(`/api/f1/homogeneity-test?${q}`);
+  const to = opts.timeoutMs ?? 180_000;
+  const signal =
+    typeof AbortSignal !== "undefined" && typeof (AbortSignal as any).timeout === "function"
+      ? (AbortSignal as any).timeout(to)
+      : undefined;
+  const r = await fetch(`/api/f1/homogeneity-test?${q}`, { signal });
   if (!r.ok) throw new Error("F1 균일성 검정 로드 실패");
   return r.json();
 }

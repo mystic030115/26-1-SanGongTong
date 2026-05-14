@@ -98,6 +98,12 @@ function fmtPct(v: number | null | undefined): string {
   return `${v.toFixed(1)}%`;
 }
 
+function fmtPvalue(p: number | null | undefined): string {
+  if (p == null || !Number.isFinite(p)) return "—";
+  if (p < 1e-4) return "<0.0001";
+  return p.toFixed(4);
+}
+
 function clamp01(x: number): number {
   return Math.max(0, Math.min(1, x));
 }
@@ -300,12 +306,25 @@ export default function DistrictSavingsPanel() {
   }, [loadFactorsTable]);
 
   const loadF1Test = useCallback(async () => {
+    setF1TestErr(null);
     try {
-      const j = await fetchF1HomogeneityTest({ coverageThrPct, mcSims: 500, sampleN: 30000, alpha: 0.05 });
+      const j = await fetchF1HomogeneityTest({
+        coverageThrPct,
+        mcSims: 220,
+        sampleN: 10000,
+        alpha: 0.05,
+        timeoutMs: 180_000,
+      });
       setF1Test(j);
-      setF1TestErr(j.error ? String(j.error) : null);
+      setF1TestErr(null);
     } catch (e) {
-      setF1TestErr(String(e));
+      const msg = String(e);
+      setF1TestErr(msg);
+      setF1Test({
+        empty: true,
+        error: msg,
+        coverage_thr_pct: coverageThrPct,
+      });
     }
   }, [coverageThrPct]);
 
@@ -910,6 +929,24 @@ export default function DistrictSavingsPanel() {
               </div>
               <div className="mini-sub">
                 25개 구 F1 산술평균 · 가설 1 기준 ≥{F1_MEANINGFUL.toFixed(2)} · Depth×Coverage 조화
+                {factors?.mean_f1_stats?.p_value_mean_gt_threshold_t != null &&
+                Number.isFinite(factors.mean_f1_stats.p_value_mean_gt_threshold_t) ? (
+                  <>
+                    {" "}
+                    · 단측 t (평균 &gt; {F1_MEANINGFUL.toFixed(2)}, 구를 독립 표본으로 가정){" "}
+                    <span className="mono">p={fmtPvalue(factors.mean_f1_stats.p_value_mean_gt_threshold_t)}</span>
+                    {factors.mean_f1_stats.bootstrap_mean_ci95?.length === 2 ? (
+                      <>
+                        {" "}
+                        · 부트스트랩 평균 95% CI{" "}
+                        <span className="mono">
+                          [{factors.mean_f1_stats.bootstrap_mean_ci95[0].toFixed(3)},{" "}
+                          {factors.mean_f1_stats.bootstrap_mean_ci95[1].toFixed(3)}]
+                        </span>
+                      </>
+                    ) : null}
+                  </>
+                ) : null}
               </div>
             </div>
 
@@ -1684,6 +1721,24 @@ export default function DistrictSavingsPanel() {
                 기준: 25구 F1 산술평균 ≥ {F1_MEANINGFUL.toFixed(2)} →{" "}
                 <strong>{overallF1Ok == null ? "판정 불가" : overallF1Ok ? "충족" : "미충족"}</strong>
                 {overallF1Ok != null ? " (절약 ‘규모·범위’ 조화가 전역적으로 요구 수준에 도달했는지)." : null}
+                {factors?.mean_f1_stats?.p_value_mean_gt_threshold_t != null &&
+                Number.isFinite(factors.mean_f1_stats.p_value_mean_gt_threshold_t) ? (
+                  <>
+                    {" "}
+                    통계 보조: 단측 t (평균 &gt; {F1_MEANINGFUL.toFixed(2)}){" "}
+                    <span className="mono">p={fmtPvalue(factors.mean_f1_stats.p_value_mean_gt_threshold_t)}</span>
+                    {factors.mean_f1_stats.bootstrap_mean_ci95?.length === 2 ? (
+                      <>
+                        , 부트스트랩 평균 95% CI{" "}
+                        <span className="mono">
+                          [{factors.mean_f1_stats.bootstrap_mean_ci95[0].toFixed(3)},{" "}
+                          {factors.mean_f1_stats.bootstrap_mean_ci95[1].toFixed(3)}]
+                        </span>
+                      </>
+                    ) : null}
+                    .
+                  </>
+                ) : null}
               </div>
             </div>
             <div className="mini-banner" style={{ borderLeft: hypo2VerdictBorder, paddingLeft: 10 }}>
@@ -1985,10 +2040,12 @@ export default function DistrictSavingsPanel() {
             <table className="geo-table">
               <thead>
                 <tr>
-                  <th style={{ width: "30%" }}>요인</th>
-                  <th style={{ width: "16%" }}>target</th>
+                  <th style={{ width: "26%" }}>요인</th>
+                  <th style={{ width: "14%" }}>target</th>
                   <th className="num">Pearson r</th>
+                  <th className="num">Pearson p</th>
                   <th className="num">Spearman ρ</th>
+                  <th className="num">Spearman p</th>
                   <th className="num">n</th>
                 </tr>
               </thead>
@@ -2006,9 +2063,11 @@ export default function DistrictSavingsPanel() {
                       <td className="num mono">
                         {r.pearson_r == null || !Number.isFinite(Number(r.pearson_r)) ? "—" : Number(r.pearson_r).toFixed(3)}
                       </td>
+                      <td className="num mono">{fmtPvalue(r.pearson_p)}</td>
                       <td className="num mono">
                         {r.spearman_r == null || !Number.isFinite(Number(r.spearman_r)) ? "—" : Number(r.spearman_r).toFixed(3)}
                       </td>
+                      <td className="num mono">{fmtPvalue(r.spearman_p)}</td>
                       <td className="num mono">{r.n}</td>
                     </tr>
                   ))}
