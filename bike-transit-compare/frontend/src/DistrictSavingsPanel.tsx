@@ -1692,7 +1692,7 @@ export default function DistrictSavingsPanel() {
             <p className="charts-meta" style={{ marginTop: 8 }}>
               <strong>2단계 — 요인 상관</strong> <strong>대립가설(H₁)</strong>: 선택한 요인과 가나다순 25구 F1의 Pearson 상관이 0이 아니다.{" "}
               <strong>귀무가설(H₀)</strong>: 상관이 0이다(선형 연관 없음).{" "}
-              아래 표·구별 F1+요인 차트·<a href="#f1-hist-hypo2">F1 분포 히스토그램</a>과 함께 쓰며, 공선성은 VIF로 점검합니다.
+              아래 구별 F1+요인 차트·<a href="#f1-hist-hypo2">F1 분포 히스토그램</a>과 함께 씁니다.
             </p>
           </div>
         </div>
@@ -1839,7 +1839,7 @@ export default function DistrictSavingsPanel() {
             <div className="subhypo-badge">2단계 · 요인 데이터</div>
             <div className="subhypo-meta">
               자치구 단위 기본 7개 + 보조 CSV 슬롯 3개(1인 가구·고용률·공원면적) · Coverage 임계는 가설 1과 동일(
-              {coverageThrPct}%) · 상관·VIF는 저장된 구 요약과 동기화됩니다.
+              {coverageThrPct}%) · 요인 값은 저장된 구 요약과 동기화됩니다.
             </div>
           </div>
           <div className="charts-meta" style={{ marginTop: 8 }}>
@@ -1992,7 +1992,7 @@ export default function DistrictSavingsPanel() {
             <div className="mini-controls">
               <div className="seg-label">다음 단계</div>
               <div className="charts-meta">
-                상관이 높게 나오더라도, 요인 간 공선성(VIF/상관행렬)을 함께 보고 해석합니다.
+                상관이 높게 나오더라도, 요인 간 상관을 함께 보고 해석합니다.
               </div>
             </div>
           </div>
@@ -2236,78 +2236,6 @@ export default function DistrictSavingsPanel() {
             </p>
           </div>
 
-          <div className="geo-table-wrap" style={{ marginTop: 12 }}>
-            <table className="geo-table">
-              <thead>
-                <tr>
-                  <th style={{ width: "26%" }}>요인</th>
-                  <th style={{ width: "14%" }}>target</th>
-                  <th className="num">Pearson r</th>
-                  <th className="num">Pearson p</th>
-                  <th className="num">Spearman ρ</th>
-                  <th className="num">Spearman p</th>
-                  <th className="num">n</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(factors?.corr_rows ?? [])
-                  .filter((r: FactorsCorrelationRow) => r.category === factorCategory)
-                  .filter((r: FactorsCorrelationRow) => r.target === "f1")
-                  .slice()
-                  .sort((a, b) => (Math.abs(b.pearson_r ?? 0) - Math.abs(a.pearson_r ?? 0)))
-                  .slice(0, 12)
-                  .map((r) => (
-                    <tr key={`${r.factor}-${r.target}`}>
-                      <td className="label">{factorLabelKr(r.factor)}</td>
-                      <td className="mono">{r.target}</td>
-                      <td className="num mono">
-                        {r.pearson_r == null || !Number.isFinite(Number(r.pearson_r)) ? "—" : Number(r.pearson_r).toFixed(3)}
-                      </td>
-                      <td className="num mono">{fmtPvalue(r.pearson_p)}</td>
-                      <td className="num mono">
-                        {r.spearman_r == null || !Number.isFinite(Number(r.spearman_r)) ? "—" : Number(r.spearman_r).toFixed(3)}
-                      </td>
-                      <td className="num mono">{fmtPvalue(r.spearman_p)}</td>
-                      <td className="num mono">{r.n}</td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="geo-table-wrap" style={{ marginTop: 12 }}>
-            <table className="geo-table">
-              <thead>
-                <tr>
-                  <th style={{ width: "45%" }}>다중공선성(VIF)</th>
-                  <th className="num">VIF</th>
-                  <th className="num">R²</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(factors?.vif ?? []).slice(0, 12).map((r) => {
-                  const vifN = Number(r.vif);
-                  const r2N = Number((r as { r2?: unknown }).r2);
-                  return (
-                    <tr key={r.factor}>
-                      <td className="label">{factorLabelKr(r.factor)}</td>
-                      <td className="num mono">
-                        {Number.isFinite(vifN) ? vifN.toFixed(2) : "∞"}
-                      </td>
-                      <td className="num mono">{Number.isFinite(r2N) ? r2N.toFixed(3) : "—"}</td>
-                    </tr>
-                  );
-                })}
-                {(!factors?.vif || factors.vif.length === 0) && (
-                  <tr>
-                    <td className="label" colSpan={3}>
-                      VIF 계산을 위한 요인 수/완전사례가 부족합니다. (요인을 더 추가하면 자동으로 표시됩니다.)
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
         </div>
       </section>
 

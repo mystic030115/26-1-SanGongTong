@@ -50,8 +50,8 @@ function formatSixGroupLabel(label: string): string {
   return label
     .replace(/^\d+_/, "")
     .replace(/__/g, " · ")
-    .replace(/Capa부족하지않음/g, "Capa 부족하지 않음")
-    .replace(/Capa부족/g, "Capa 부족");
+    .replace(/부족O/g, "부족 O")
+    .replace(/부족X/g, "부족 X");
 }
 
 export default function SupplyDemandPanel() {
@@ -113,7 +113,7 @@ export default function SupplyDemandPanel() {
             </h2>
             <p className="charts-meta">
               대여소 용량(Capa)과 실제 유동량·순유입을 4단계로 검정합니다. ① Capa ↔ 일평균 유동량 상관 → ② 대여소별 순유입량 0
-              검정으로 과적(+)/고갈(−)/균형(0) 분류 → ③ Capa 부족 검정(ITDP 회전율 기준) → ④ 두 축을 결합한 6집단 분류.
+              검정으로 과적(+)/고갈(−)/균형(0) 분류 → ③ Capa 부족 검정(ITDP 회전율 기준, 부족 O/X) → ④ 두 축을 결합한 6집단 분류.
               분석 기간은 2025-01-01~2025-10-31({data?.n_days ?? 304}일)입니다.
             </p>
           </div>
@@ -250,8 +250,8 @@ export default function SupplyDemandPanel() {
             <div className="district-section-head">
               <h3>3단계 · Capa 부족 검정 (회전율 기준)</h3>
               <p className="charts-meta">
-                단측 t검정. H₀: E(시간당 대여+반납) ≤ Capa/4, H₁: &gt; Capa/4 (ITDP 일 6회 회전율의 시간 환산). 기각 시 「Capa
-                부족」, 기각하지 않으면 「Capa 부족하지 않음」. 집단별 부족 비율을 봅니다.
+                단측 t검정. H₀: E(시간당 대여+반납) ≤ Capa/4, H₁: &gt; Capa/4 (ITDP 일 6회 회전율의 시간 환산). 기각 시 「부족
+                O」, 기각하지 않으면 「부족 X」. 집단별 부족 O 비율을 봅니다.
               </p>
             </div>
             <div className="hypo2-homogeneity__table-wrap">
@@ -260,8 +260,8 @@ export default function SupplyDemandPanel() {
                   <tr>
                     <th>순유입 집단</th>
                     <th className="num">대여소 수</th>
-                    <th className="num">Capa 부족 수</th>
-                    <th className="num">부족 비율</th>
+                    <th className="num">부족 O 수</th>
+                    <th className="num">부족 O 비율</th>
                     <th className="num">평균 일유동/Capa</th>
                     <th className="num">중앙값 일유동/Capa</th>
                     <th className="num">평균 시간당 유동</th>
@@ -287,16 +287,16 @@ export default function SupplyDemandPanel() {
               </table>
             </div>
             <p className="charts-meta" style={{ marginTop: 6 }}>
-              세 집단 모두 부족 비율이 64~93%로 높아, 현 Capa가 실제 회전율을 못 따라가는 대여소가 많습니다.
+              세 집단 모두 부족 O 비율이 64~93%로 높아, 현 Capa가 실제 회전율을 못 따라가는 대여소가 많습니다.
             </p>
           </section>
 
           {/* ── 4단계: 6집단 분류 ── */}
           <section className="district-section" aria-label="4단계 6집단">
             <div className="district-section-head">
-              <h3>4단계 · 6집단 분류 ((+/−/0) × Capa 부족 여부)</h3>
+              <h3>4단계 · 6집단 분류 ((+/−/0) × 부족 O/X)</h3>
               <p className="charts-meta">
-                순유입 3집단 × Capa 부족 2분류 = 6집단. 집단별로 다른 Capa 산정 방법을 적용하기 위한 기준표입니다. 총{" "}
+                순유입 3집단 × 부족 O/X 2분류 = 6집단. 집단별로 다른 Capa 산정 방법을 적용하기 위한 기준표입니다. 총{" "}
                 {data.six_group.total}개 대여소.
               </p>
             </div>

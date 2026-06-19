@@ -3222,22 +3222,23 @@ _SUPPLY_CALENDAR_DAYS = 304  # 2025-01-01 ~ 2025-10-31
 _SUPPLY_N_DAYS = 304
 
 _NETFLOW_GROUP_ORDER = ["+_순유입/과적", "-_순유출/고갈", "0_균형(기각 안 됨)"]
-_CAPA_NOT_SHORTAGE = "Capa 부족하지 않음"
+_CAPA_SHORTAGE = "부족 O"
+_CAPA_NOT_SHORTAGE = "부족 X"
 _SIX_GROUP_ORDER: list[tuple[str, str]] = [
-    ("+_순유입/과적", "Capa 부족"),
+    ("+_순유입/과적", _CAPA_SHORTAGE),
     ("+_순유입/과적", _CAPA_NOT_SHORTAGE),
-    ("-_순유출/고갈", "Capa 부족"),
+    ("-_순유출/고갈", _CAPA_SHORTAGE),
     ("-_순유출/고갈", _CAPA_NOT_SHORTAGE),
-    ("0_균형(기각 안 됨)", "Capa 부족"),
+    ("0_균형(기각 안 됨)", _CAPA_SHORTAGE),
     ("0_균형(기각 안 됨)", _CAPA_NOT_SHORTAGE),
 ]
 _SIX_GROUP_LABELS = {
-    ("+_순유입/과적", "Capa 부족"): "01_순유입_과적__Capa부족",
-    ("+_순유입/과적", _CAPA_NOT_SHORTAGE): "02_순유입_과적__Capa부족하지않음",
-    ("-_순유출/고갈", "Capa 부족"): "03_순유출_고갈__Capa부족",
-    ("-_순유출/고갈", _CAPA_NOT_SHORTAGE): "04_순유출_고갈__Capa부족하지않음",
-    ("0_균형(기각 안 됨)", "Capa 부족"): "05_균형__Capa부족",
-    ("0_균형(기각 안 됨)", _CAPA_NOT_SHORTAGE): "06_균형__Capa부족하지않음",
+    ("+_순유입/과적", _CAPA_SHORTAGE): "01_순유입_과적__부족O",
+    ("+_순유입/과적", _CAPA_NOT_SHORTAGE): "02_순유입_과적__부족X",
+    ("-_순유출/고갈", _CAPA_SHORTAGE): "03_순유출_고갈__부족O",
+    ("-_순유출/고갈", _CAPA_NOT_SHORTAGE): "04_순유출_고갈__부족X",
+    ("0_균형(기각 안 됨)", _CAPA_SHORTAGE): "05_균형__부족O",
+    ("0_균형(기각 안 됨)", _CAPA_NOT_SHORTAGE): "06_균형__부족X",
 }
 
 
@@ -3374,7 +3375,7 @@ def supply_analysis():
     cap["mean_hourly"] = mean_hourly
     cap["daily_ratio"] = daily_ratio
     cap["_capa_reject"] = capa_issue_reject
-    cap["capacity_issue"] = np.where(capa_issue_reject, "Capa 부족", _CAPA_NOT_SHORTAGE)
+    cap["capacity_issue"] = np.where(capa_issue_reject, _CAPA_SHORTAGE, _CAPA_NOT_SHORTAGE)
 
     cap_by_group = []
     for g in _NETFLOW_GROUP_ORDER:
