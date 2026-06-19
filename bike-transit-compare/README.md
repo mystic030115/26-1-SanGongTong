@@ -19,18 +19,27 @@ pip install -r requirements.txt
 cd frontend && npm install && cd ..
 ```
 
-**터미널 1 — API**
+**터미널 1 — API** (새 터미널을 열어도 됨)
+
+아래 명령은 **반드시 `bike-transit-compare` 폴더 안**에서 실행합니다.  
+(`src/web_api.py`가 이 폴더 기준이라, 레포 루트 `26-1-SanGongTong`에서 실행하면 import 오류가 납니다.)
 
 ```bash
-cd bike-transit-compare
-source .venv/bin/activate
+cd 26-1-SanGongTong/bike-transit-compare   # clone한 위치에 맞게 조정
+source .venv/bin/activate                    # Windows: .venv\Scripts\activate
 python -m uvicorn src.web_api:app --host 127.0.0.1 --port 8000
+```
+
+또는:
+
+```bash
+./scripts/run_web_api.sh
 ```
 
 **터미널 2 — 프론트**
 
 ```bash
-cd bike-transit-compare/frontend
+cd 26-1-SanGongTong/bike-transit-compare/frontend
 npm run dev
 ```
 
@@ -108,6 +117,21 @@ python -m src.run
 ```bash
 lsof -iTCP:8000 -sTCP:LISTEN   # PID 확인
 kill PID                        # 안 되면 kill -9 PID
+```
+
+## `Could not import module "src.web_api"` 가 뜰 때
+
+uvicorn을 **레포 루트(`26-1-SanGongTong`)** 에서 실행했을 때 나는 오류입니다.
+
+```bash
+# 현재 위치 확인
+pwd
+ls src/web_api.py    # 이 파일이 보여야 함
+
+# 안 보이면 bike-transit-compare로 이동
+cd .../26-1-SanGongTong/bike-transit-compare
+source .venv/bin/activate
+python -m uvicorn src.web_api:app --host 127.0.0.1 --port 8000
 ```
 
 ---
