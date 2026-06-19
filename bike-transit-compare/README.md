@@ -42,22 +42,21 @@ npm run dev
 | **가설 2** | Capa·유동량 4단계 분석 (상관 → 순유입 검정 → Capa 부족 → 6집단) |
 
 > TMAP API 키 없이도 **레포에 포함된 캐시·데이터**로 대시보드를 볼 수 있습니다.  
-> 가설 1의 **대여 소요시간 슬라이더**를 쓰려면 아래 「관내이동 CSV」가 추가로 필요합니다.
+> 가설 1 **대여 소요시간 슬라이더(+0.5분)** 도 `관내이동_시간_거리/` CSV(25개 구)가 레포에 포함되어 있습니다.
 
-### 관내이동 CSV (선택 · 슬라이더용)
+### 관내이동 CSV (레포 포함)
 
-가설 1 borrow 보정은 `관내이동_시간_거리/` 폴더(구별 `*_시간_거리.csv` 25개)가 있어야 동작합니다.
+`bike-transit-compare/관내이동_시간_거리/`에 구별 `*_시간_거리.csv` 25개가 들어 있습니다. clone만 하면 가설 1 borrow 보정·재계산이 동작합니다.
 
 ```bash
-# 프로젝트 안에 두는 경우 (권장)
 bike-transit-compare/관내이동_시간_거리/강남구_시간_거리.csv
 # … 25개 구
 
-# 다른 경로에 있으면 API 실행 전에 지정
+# 다른 경로에 두었을 때만 API 실행 전에 지정
 export OD_DISTRICT_DIR="/경로/관내이동_시간_거리"
 ```
 
-CSV가 없으면 가설 1 페이지 로드가 실패할 수 있습니다. 가설 2는 레포 데이터만으로 동작합니다.
+처음 API 기동 후 가설 1(+0.5분) 재계산은 **1~2분** 걸릴 수 있고, 이후에는 캐시로 빨라집니다.
 
 ---
 
@@ -122,6 +121,7 @@ kill PID                        # 안 되면 kill -9 PID
 | `data/cache/tmap_by_district/` | 구별 TMAP 캐시 (대시보드용) |
 | `data/supply/` | 가설 2 수급 분석 입력 CSV |
 | `data/factors/` | 가설 1 외부 요인 데이터 |
+| `관내이동_시간_거리/` | 구별 OD CSV 25개 (가설 1 borrow 재계산) |
 | `frontend/public/district_savings.json` | 가설 1 구별 Depth/Coverage/F1 |
 | `scripts/` | `run_web_api.sh`, `run_frontend.sh`, `run_batch.sh` |
 
