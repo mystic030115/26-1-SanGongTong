@@ -1066,6 +1066,47 @@ def rebuild_district_savings():
         _district_rebuild_lock.release()
 
 
+# borrow_min(0.01분 반올림) -> 재계산 payload 캐시 (디스크 재스캔 1회 후 빠른 재사용)
+_DISTRICT_SAVINGS_BORROW_CACHE: dict[tuple[int, int, int], dict] = {}
+
+
+@app.get("/api/district-savings/with-borrow")
+def district_savings_with_borrow(
+    borrow_min: float = Query(0.0, ge=0.0, le=10.0),
+):
+    """따릉이 대여 소요시간(borrow_min, 분)을 더해 재계산한 district_savings payload를 반환.
+
+    파일을 덮어쓰지 않고 메모리에서 생성한다(가설1 슬라이더 '적용'용).
+    borrow_min=0이면 기존 district_savings.json과 동일한 값.
+    """
+    root = Path(__file__).resolve().parent.parent
+    od_dir = Path(os.getenv("OD_DISTRICT_DIR") or _default_od_dir())
+    tmap_dir = root / "data" / "cache" / "tmap_by_district"
+    if not od_dir.exists():
+        raise HTTPException(404, f"OD dir not found: {od_dir}")
+    if not tmap_dir.exists():
+        raise HTTPException(404, f"TMAP dir not found: {tmap_dir}")
+
+    key = (
+        int(round(float(borrow_min) * 100)),
+        _max_mtime_glob(od_dir, "*.csv"),
+        _max_mtime_glob(tmap_dir, "*_tmap_pairs.csv"),
+    )
+    cached = _DISTRICT_SAVINGS_BORROW_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    from scripts.build_district_savings import build_payload as _build_payload  # type: ignore
+
+    try:
+        payload = _build_payload(od_dir, tmap_dir, float(borrow_min))
+    except Exception as e:
+        raise HTTPException(500, f"recompute failed: {e}")
+
+    _DISTRICT_SAVINGS_BORROW_CACHE[key] = payload
+    return payload
+
+
 @app.get("/api/diagnostics/transit-last")
 def diagnostics_transit_last(
     limit: int = Query(10, ge=1, le=100),
@@ -1347,6 +1388,154 @@ def _factors_meta_path() -> Path:
     return root / "data" / "factors" / "gu_factors_meta.json"
 
 
+def _factors_supplemental_dir() -> Path:
+    root = Path(__file__).resolve().parent.parent
+    d = root / "data" / "factors" / "supplemental"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# CSV만 채우면 상관·VIF 분석에 자동 반영되는 보조 요인 슬롯 (wide CSV 컬럼명과 동일)
+SUPPLEMENTAL_FACTOR_SLOTS: list[dict[str, Any]] = [
+    {
+        "factor": "single_person_household_ratio_pct",
+        "file": "single_person_household_ratio_pct.csv",
+        "unit": "%",
+        "category": "population",
+        "wide_column": "single_person_household_ratio_pct",
+        "period_column": "single_person_household_year",
+    },
+    {
+        "factor": "employment_rate_pct",
+        "file": "employment_rate_pct.csv",
+        "unit": "%",
+        "category": "income",
+        "wide_column": "employment_rate_pct",
+        "period_column": "employment_rate_year",
+    },
+    {
+        "factor": "park_area_total_m2",
+        "file": "park_area_total_m2.csv",
+        "unit": "m²",
+        "category": "geo",
+        "wide_column": "park_area_total_m2",
+        "period_column": "park_area_year",
+    },
+]
+
+
+def _extra_wide_factor_columns() -> list[tuple[str, str, str | None]]:
+    """(column, unit, optional period column in wide CSV)"""
+    out: list[tuple[str, str, str | None]] = []
+    for spec in SUPPLEMENTAL_FACTOR_SLOTS:
+        out.append((str(spec["wide_column"]), str(spec["unit"]), spec.get("period_column")))
+    return out
+
+
+def _read_one_supplemental_csv(fp: Path, spec: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, Any]]:
+    factor = str(spec["factor"])
+    status: dict[str, Any] = {
+        "factor": factor,
+        "file": fp.name,
+        "category": spec.get("category"),
+        "exists": fp.exists(),
+        "loaded": False,
+        "rows": 0,
+        "path": str(fp),
+    }
+    cols = ["gu", "factor", "value", "unit", "source", "year"]
+    if not fp.exists():
+        return pd.DataFrame(columns=cols), status
+    try:
+        raw = pd.read_csv(fp)
+    except Exception as exc:
+        status["error"] = str(exc)
+        return pd.DataFrame(columns=cols), status
+    if raw.empty:
+        return pd.DataFrame(columns=cols), status
+
+    df = raw.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    if "gu" not in df.columns:
+        status["error"] = "missing column: gu"
+        return pd.DataFrame(columns=cols), status
+
+    value_col: str | None = None
+    if "value" in df.columns:
+        value_col = "value"
+    elif factor in df.columns:
+        value_col = factor
+    else:
+        numeric_cols = [
+            c
+            for c in df.columns
+            if c != "gu" and c != "factor" and pd.to_numeric(df[c], errors="coerce").notna().any()
+        ]
+        if len(numeric_cols) == 1:
+            value_col = numeric_cols[0]
+
+    if value_col is None:
+        status["error"] = f"missing value column (expected value or {factor})"
+        return pd.DataFrame(columns=cols), status
+
+    df["gu"] = df["gu"].astype(str).str.strip()
+    vals = pd.to_numeric(df[value_col], errors="coerce")
+    unit_series = df["unit"].astype(str).str.strip() if "unit" in df.columns else None
+    source_series = df["source"].astype(str).str.strip() if "source" in df.columns else None
+    year_series = df["year"].astype(str).str.strip() if "year" in df.columns else None
+
+    out_rows: list[dict[str, Any]] = []
+    for i, gu in enumerate(df["gu"].tolist()):
+        v = vals.iloc[i]
+        if v is None or not np.isfinite(v):
+            continue
+        out_rows.append(
+            {
+                "gu": str(gu).strip(),
+                "factor": factor,
+                "value": float(v),
+                "unit": str(spec.get("unit") or ""),
+                "source": (str(source_series.iloc[i]) if source_series is not None else ""),
+                "year": (str(year_series.iloc[i]) if year_series is not None else ""),
+            }
+        )
+    if unit_series is not None:
+        for j, row in enumerate(out_rows):
+            u = str(unit_series.iloc[j]) if j < len(unit_series) else ""
+            if u and u.lower() != "nan":
+                row["unit"] = u
+    out = pd.DataFrame(out_rows, columns=cols)
+    status["loaded"] = not out.empty
+    status["rows"] = int(len(out))
+    return out, status
+
+
+def _read_supplemental_factors_long() -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    parts: list[pd.DataFrame] = []
+    statuses: list[dict[str, Any]] = []
+    base = _factors_supplemental_dir()
+    for spec in SUPPLEMENTAL_FACTOR_SLOTS:
+        fp = base / str(spec["file"])
+        chunk, st = _read_one_supplemental_csv(fp, spec)
+        statuses.append(st)
+        if not chunk.empty:
+            parts.append(chunk)
+    if not parts:
+        return pd.DataFrame(columns=["gu", "factor", "value", "unit", "source", "year"]), statuses
+    return pd.concat(parts, ignore_index=True), statuses
+
+
+def _merge_factors_long(*frames: pd.DataFrame) -> pd.DataFrame:
+    cols = ["gu", "factor", "value", "unit", "source", "year"]
+    nonempty = [f for f in frames if f is not None and not f.empty]
+    if not nonempty:
+        return pd.DataFrame(columns=cols)
+    merged = pd.concat(nonempty, ignore_index=True)
+    merged["gu"] = merged["gu"].astype(str).str.strip()
+    merged["factor"] = merged["factor"].astype(str).str.strip()
+    return merged.drop_duplicates(subset=["gu", "factor"], keep="first").reset_index(drop=True)
+
+
 def _read_factors_long() -> pd.DataFrame:
     """
     Returns normalized long-format factors:
@@ -1372,7 +1561,7 @@ def _read_factors_long() -> pd.DataFrame:
                 ("mountain_forest_proxy_ratio_pct", "%", dfw.get("mountain_forest_proxy_year")),
                 ("elderly_65plus_ratio_pct", "%", dfw.get("aging_ratio_period")),
                 ("income_std_proxy_krw_per_month", "원", dfw.get("income_std_proxy_period")),
-            ]
+            ] + _extra_wide_factor_columns()
             out_rows: list[dict[str, Any]] = []
             for col, unit, period_series in keep:
                 if col not in dfw.columns:
@@ -1393,23 +1582,34 @@ def _read_factors_long() -> pd.DataFrame:
                             "year": (str(years.iloc[i]) if years is not None else ""),
                         }
                     )
-            return pd.DataFrame(out_rows, columns=["gu", "factor", "value", "unit", "source", "year"])
+            base_df = pd.DataFrame(out_rows, columns=["gu", "factor", "value", "unit", "source", "year"])
+            supp_df, _ = _read_supplemental_factors_long()
+            return _merge_factors_long(base_df, supp_df)
 
     fp = _factors_csv_path()
     if not fp.exists():
-        return pd.DataFrame(columns=["gu", "factor", "value", "unit", "source", "year"])
+        supp_df, _ = _read_supplemental_factors_long()
+        return supp_df
     df = pd.read_csv(fp)
     if df.empty:
-        return df
+        supp_df, _ = _read_supplemental_factors_long()
+        return supp_df
     df["gu"] = df["gu"].astype(str).str.strip()
     df["factor"] = df["factor"].astype(str).str.strip()
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    return df
+    supp_df, _ = _read_supplemental_factors_long()
+    return _merge_factors_long(df, supp_df)
 
 
 def _factor_category_from_name(name: str) -> str:
     """메타에 category가 없을 때 컬럼명 휴리스틱(인구/소득/지리)."""
     s = (name or "").lower()
+    if any(k in s for k in ("employment", "employ", "고용")):
+        return "income"
+    if any(k in s for k in ("park", "공원")):
+        return "geo"
+    if any(k in s for k in ("household", "single_person", "1인", "가구")):
+        return "population"
     if any(k in s for k in ("income", "krw", "salary", "wage", "earn", "proxy_krw")):
         return "income"
     if any(k in s for k in ("dist", "km", "mountain", "forest", "geo", "center", "cityhall", "centroid")):
@@ -1461,6 +1661,27 @@ def _default_wide_factor_meta() -> dict[str, dict[str, Any]]:
             "category": "income",
             "unit": "원",
             "summary_ko": "공식 구별 소득 표준편차가 없어, 평균소득×가정 CV로 만든 proxy(정식 통계 아님).",
+        },
+        "single_person_household_ratio_pct": {
+            "label_ko": "1인 가구 비율(%)",
+            "category": "population",
+            "unit": "%",
+            "summary_ko": "1인가구÷일반가구×100 (2024 시군구 합계, 주민등록 가구통계).",
+            "csv_slot": "data/factors/supplemental/single_person_household_ratio_pct.csv",
+        },
+        "employment_rate_pct": {
+            "label_ko": "고용률(%)",
+            "category": "income",
+            "unit": "%",
+            "summary_ko": "15세+ 시군구 고용률(2025 Q2, KOSIS 경제활동인구 총괄).",
+            "csv_slot": "data/factors/supplemental/employment_rate_pct.csv",
+        },
+        "park_area_total_m2": {
+            "label_ko": "공원 면적(㎡, 합계)",
+            "category": "geo",
+            "unit": "m²",
+            "summary_ko": "2024 구별 공원 면적 합(천㎡→㎡, 종류별 단순 합산 proxy).",
+            "csv_slot": "data/factors/supplemental/park_area_total_m2.csv",
         },
     }
 
@@ -1584,13 +1805,18 @@ def _vif_table(x: pd.DataFrame) -> list[dict[str, Any]]:
 def factors_table():
     """
     요인표(정규화된 long-format).
-    - 우선순위: `data/factors/seoul_gu_features_combined_wide.csv` (7개 요인) → `data/factors/gu_factors.csv`(legacy)
+    - 우선순위: `data/factors/seoul_gu_features_combined_wide.csv` (기본 7요인 + 선택 컬럼)
+      → `data/factors/supplemental/*.csv` (1인가구·고용률·공원면적 슬롯)
+      → `data/factors/gu_factors.csv`(legacy)
     """
     df = _read_factors_long()
     meta = _read_factors_meta()
+    _, supplemental_status = _read_supplemental_factors_long()
     return {
         "empty": bool(df.empty),
         "csv": str(_factors_wide_csv_path() if _factors_wide_csv_path().exists() else _factors_csv_path()),
+        "supplemental_dir": str(_factors_supplemental_dir()),
+        "supplemental": supplemental_status,
         "rows": df.to_dict(orient="records"),
         "meta": meta,
     }
@@ -1599,6 +1825,7 @@ def factors_table():
 @app.get("/api/factors/analysis")
 def factors_analysis(
     coverage_thr_pct: int = Query(20, ge=0, le=95),
+    borrow_min: float = Query(0.0, ge=0.0, le=10.0),
 ):
     """
     소가설2 분석용 요인 통계:
@@ -1609,6 +1836,9 @@ def factors_analysis(
     F1은 프런트 정의와 동일:
       F1 = 2 * (Depth/100) * (Coverage/100) / ((Depth/100)+(Coverage/100))
     Coverage는 district_savings.json의 히스토그램으로 임계(coverage_thr_pct) 기준 계산.
+
+    borrow_min(따릉이 대여 소요시간, 분) > 0이면 따릉이 시간에 그만큼 더해
+    OD pair-level 데이터로 구별 depth/coverage/F1을 재계산한다(0이면 기존 JSON 경로).
     """
     root = Path(__file__).resolve().parent.parent
     savings_fp = root / "frontend" / "public" / "district_savings.json"
@@ -1622,23 +1852,47 @@ def factors_analysis(
     hist_by_gu = savings.get("coverage_hist_1pct_by_gu") or {}
     matched_w_by_gu = savings.get("matched_weight_by_gu") or {}
 
+    use_borrow = float(borrow_min) > 1e-9
+    borrow_by_gu: dict[str, dict[str, float]] = {}
+    if use_borrow:
+        od_dir = Path(os.getenv("OD_DISTRICT_DIR") or _default_od_dir())
+        tmap_dir = _tmap_by_district_dir()
+        if od_dir.exists() and tmap_dir.exists():
+            try:
+                borrow_by_gu = _per_gu_f1_with_borrow(float(borrow_min), int(coverage_thr_pct), od_dir, tmap_dir)
+            except Exception:
+                borrow_by_gu = {}
+        if not borrow_by_gu:
+            use_borrow = False  # 데이터 못 읽으면 기존 경로로 폴백
+
     # build target metrics by gu
     rows_t: list[dict[str, Any]] = []
-    for d in districts:
-        gu = str(d.get("gu") or "").strip()
-        dep = d.get("depth_pct")
-        try:
-            depth = float(dep) if dep is not None else None
-        except Exception:
-            depth = None
-        cov = _coverage_from_hist(hist_by_gu.get(gu), matched_w_by_gu.get(gu), int(coverage_thr_pct))
-        if depth is None or cov is None or not np.isfinite(depth) or not np.isfinite(cov):
-            continue
-        dd = max(0.0, min(1.0, depth / 100.0))
-        cc = max(0.0, min(1.0, cov / 100.0))
-        s = dd + cc
-        f1 = (2 * dd * cc / s) if s > 0 else 0.0
-        rows_t.append({"gu": gu, "depth_pct": float(depth), "coverage_pct": float(cov), "f1": float(f1)})
+    if use_borrow:
+        for gu, m in borrow_by_gu.items():
+            rows_t.append(
+                {
+                    "gu": str(gu),
+                    "depth_pct": float(m["depth_pct"]),
+                    "coverage_pct": float(m["coverage_pct"]),
+                    "f1": float(m["f1"]),
+                }
+            )
+    else:
+        for d in districts:
+            gu = str(d.get("gu") or "").strip()
+            dep = d.get("depth_pct")
+            try:
+                depth = float(dep) if dep is not None else None
+            except Exception:
+                depth = None
+            cov = _coverage_from_hist(hist_by_gu.get(gu), matched_w_by_gu.get(gu), int(coverage_thr_pct))
+            if depth is None or cov is None or not np.isfinite(depth) or not np.isfinite(cov):
+                continue
+            dd = max(0.0, min(1.0, depth / 100.0))
+            cc = max(0.0, min(1.0, cov / 100.0))
+            s = dd + cc
+            f1 = (2 * dd * cc / s) if s > 0 else 0.0
+            rows_t.append({"gu": gu, "depth_pct": float(depth), "coverage_pct": float(cov), "f1": float(f1)})
 
     targets = pd.DataFrame(rows_t)
     if targets.empty:
@@ -1749,19 +2003,96 @@ def factors_analysis(
             "bootstrap_mean_ci95": [ci_low, ci_high],
         }
 
+    f1_by_gu = {
+        str(r["gu"]): float(r["f1"])
+        for r in rows_t
+        if r.get("gu") and r.get("f1") is not None and np.isfinite(float(r["f1"]))
+    }
+
     return {
         "empty": False,
         "coverage_thr_pct": int(coverage_thr_pct),
+        "borrow_min": float(borrow_min),
         "targets_n": int(len(targets)),
         "factors_n": int(len(factor_cols)),
         "mean_f1_stats": mean_f1_stats,
         "corr_rows": corr_rows,
+        "f1_by_gu": f1_by_gu,
         "factor_corr": {
             "factors": list(corr_mat.columns),
             "matrix": corr_mat.round(6).to_numpy().tolist() if not corr_mat.empty else [],
         },
         "vif": vif_rows,
         "meta": meta,
+    }
+
+
+@app.get("/api/factors/linear-cano-analysis")
+def factors_linear_cano_analysis(
+    coverage_thr_pct: int = Query(20, ge=0, le=95),
+    alpha: float = Query(0.05, gt=0, lt=1),
+    abs_r_threshold: float = Query(0.2, ge=0, le=1),
+    min_n: int = Query(15, ge=4, le=50),
+):
+    """
+    연관 요인(|r|≥임계)에 대한 단순 선형 회귀 F1~X_j 및 CCA(CANO).
+    단순 회귀 비유의 요인은 X블록 정준상관으로 다변량 해석.
+    """
+    from .factor_linear_cano import run_associated_factor_analysis
+
+    base = factors_analysis(coverage_thr_pct=coverage_thr_pct)
+    if base.get("empty"):
+        return {**base, "linear_cano_empty": True}
+
+    root = Path(__file__).resolve().parent.parent
+    savings_fp = root / "frontend" / "public" / "district_savings.json"
+    import json as _json
+
+    savings = _json.loads(savings_fp.read_text(encoding="utf-8"))
+    districts = savings.get("districts") or []
+    hist_by_gu = savings.get("coverage_hist_1pct_by_gu") or {}
+    matched_w_by_gu = savings.get("matched_weight_by_gu") or {}
+
+    rows_t: list[dict[str, Any]] = []
+    for d in districts:
+        gu = str(d.get("gu") or "").strip()
+        dep = d.get("depth_pct")
+        try:
+            depth = float(dep) if dep is not None else None
+        except Exception:
+            depth = None
+        cov = _coverage_from_hist(hist_by_gu.get(gu), matched_w_by_gu.get(gu), int(coverage_thr_pct))
+        if depth is None or cov is None or not np.isfinite(depth) or not np.isfinite(cov):
+            continue
+        rows_t.append(
+            {
+                "gu": gu,
+                "depth_pct": float(depth),
+                "coverage_pct": float(cov),
+                "f1": _f1_from_depth_coverage(float(depth), float(cov)),
+            }
+        )
+    targets = pd.DataFrame(rows_t)
+    long = _read_factors_long()
+    if long.empty or targets.empty:
+        return {"empty": True, "error": "No merged panel for linear/CCA."}
+    wide = long.pivot_table(index="gu", columns="factor", values="value", aggfunc="mean")
+    merged = targets.merge(wide, left_on="gu", right_index=True, how="left")
+    meta = _read_factors_meta()
+    factor_meta = (meta.get("factors") or {}) if isinstance(meta, dict) else {}
+
+    lc = run_associated_factor_analysis(
+        merged,
+        factor_meta,
+        abs_r_threshold=float(abs_r_threshold),
+        min_n=int(min_n),
+        alpha=float(alpha),
+        corr_rows=base.get("corr_rows") or [],
+    )
+    return {
+        "coverage_thr_pct": int(coverage_thr_pct),
+        "corr_summary": base,
+        "linear_cano": lc,
     }
 
 
@@ -1896,11 +2227,150 @@ def _load_f1_homogeneity_trip_arrays(
     return w, ta, da, ha
 
 
+# (od_mtime, tmap_mtime) -> {gu: {"t","bike","w": np.ndarray}} — 대여시간 슬라이더 재계산용 pair-level 풀
+_PAIR_LEVEL_POOL: dict[tuple[int, int], dict[str, dict[str, np.ndarray]]] = {}
+
+
+def _load_pair_level_by_gu(od_dir: Path, tmap_dir: Path) -> dict[str, dict[str, np.ndarray]]:
+    """OD + 구별 TMAP OK 캐시에서 (transit, bike, weight)를 구별로 적재. 대여시간 A를 더해 depth/coverage 재계산용."""
+    key = (_max_mtime_glob(od_dir, "*.csv"), _max_mtime_glob(tmap_dir, "*_tmap_pairs.csv"))
+    cached = _PAIR_LEVEL_POOL.get(key)
+    if cached is not None:
+        return cached
+
+    def _pair_key(a: str, b: str) -> tuple[str, str]:
+        return (a, b) if a < b else (b, a)
+
+    def _clean_header(s: str) -> str:
+        return (s or "").replace("\ufeff", "").strip()
+
+    def _pick_field(fieldnames: list[str], want: str) -> str:
+        m = {_clean_header(f): f for f in fieldnames}
+        k = _clean_header(want)
+        if k not in m:
+            raise ValueError(f"missing column '{want}'")
+        return m[k]
+
+    out: dict[str, dict[str, np.ndarray]] = {}
+    for fp in sorted([p for p in od_dir.glob("*.csv") if p.is_file()]):
+        gu = fp.stem.replace("_시간_거리", "")
+        cache_path = tmap_dir / f"{gu}_tmap_pairs.csv"
+        if not cache_path.exists():
+            continue
+        tmap: dict[tuple[str, str], float] = {}
+        try:
+            with open(cache_path, "r", encoding="utf-8", newline="") as f:
+                r = _csv.DictReader(f)
+                if not r.fieldnames:
+                    continue
+                ak = _pick_field(r.fieldnames, "a_id")
+                bk = _pick_field(r.fieldnames, "b_id")
+                tk = _pick_field(r.fieldnames, "transit_total_min_1dp")
+                sk = _pick_field(r.fieldnames, "transit_status")
+                for row in r:
+                    if (row.get(sk) or "").strip() != "OK":
+                        continue
+                    a = (row.get(ak) or "").strip()
+                    b = (row.get(bk) or "").strip()
+                    if not a or not b or a == b:
+                        continue
+                    try:
+                        t = float((row.get(tk) or "").strip())
+                    except Exception:
+                        continue
+                    tmap[_pair_key(a, b)] = t
+        except Exception:
+            continue
+
+        ts: list[float] = []
+        bikes: list[float] = []
+        wts2: list[float] = []
+        try:
+            with open(fp, "r", encoding="utf-8", newline="") as f:
+                r = _csv.DictReader(f)
+                if not r.fieldnames:
+                    continue
+                sk = _pick_field(r.fieldnames, "시작_대여소_ID")
+                ek = _pick_field(r.fieldnames, "종료_대여소_ID")
+                bk = _pick_field(r.fieldnames, "전체_이용_분")
+                wk = _pick_field(r.fieldnames, "빈도")
+                for row in r:
+                    a = (row.get(sk) or "").strip()
+                    b = (row.get(ek) or "").strip()
+                    if not a or not b or a == b:
+                        continue
+                    try:
+                        bike_min = float((row.get(bk) or "").strip())
+                        w = float((row.get(wk) or "").strip())
+                    except Exception:
+                        continue
+                    if not np.isfinite(w) or w <= 0:
+                        continue
+                    t = tmap.get(_pair_key(a, b))
+                    if t is None or not np.isfinite(t):
+                        continue
+                    ts.append(float(t))
+                    bikes.append(float(bike_min))
+                    wts2.append(float(w))
+        except Exception:
+            continue
+
+        if ts:
+            out[gu] = {
+                "t": np.array(ts, dtype=np.float64),
+                "bike": np.array(bikes, dtype=np.float64),
+                "w": np.array(wts2, dtype=np.float64),
+            }
+
+    _PAIR_LEVEL_POOL[key] = out
+    return out
+
+
+def _per_gu_f1_with_borrow(
+    borrow_min: float, coverage_thr_pct: int, od_dir: Path, tmap_dir: Path
+) -> dict[str, dict[str, float]]:
+    """대여시간 A(분)를 따릉이 시간에 더했을 때 구별 depth/coverage/F1을 재계산.
+
+    depth_pct    = Σ max(transit − (bike + A), 0)·w / Σ transit·w × 100
+    coverage_pct = Σ[ (transit − bike − A)/transit×100 ≥ thr ]·w / Σ w × 100   (matched-only)
+    F1           = 2·d·c / (d + c)  (d, c는 0~1 정규화)
+    """
+    data = _load_pair_level_by_gu(od_dir, tmap_dir)
+    A = float(borrow_min)
+    thr = float(int(coverage_thr_pct))
+    res: dict[str, dict[str, float]] = {}
+    for gu, d in data.items():
+        t = d["t"]
+        bike = d["bike"]
+        w = d["w"]
+        if t.size == 0:
+            continue
+        adj = t - bike - A
+        dpos = np.maximum(adj, 0.0)
+        denom = float(np.sum(t * w))
+        if denom <= 0:
+            continue
+        depth = float(np.sum(dpos * w) / denom * 100.0)
+        matched_w = float(np.sum(w))
+        if matched_w <= 0:
+            continue
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where(t > 0, adj / t * 100.0, -1.0)
+        hit = (ratio >= thr).astype(np.float64)
+        coverage = float(np.sum(hit * w) / matched_w * 100.0)
+        dd = max(0.0, min(1.0, depth / 100.0))
+        cc = max(0.0, min(1.0, coverage / 100.0))
+        s = dd + cc
+        f1 = (2.0 * dd * cc / s) if s > 0 else 0.0
+        res[gu] = {"depth_pct": depth, "coverage_pct": coverage, "f1": f1}
+    return res
+
+
 @app.get("/api/f1/homogeneity-test")
 def f1_homogeneity_test(
     coverage_thr_pct: int = Query(20, ge=0, le=95),
     alpha: float = Query(0.05, gt=0.0, lt=1.0),
-    mc_sims: int = Query(250, ge=80, le=5000),
+    mc_sims: int = Query(10000, ge=80, le=10000),
     sample_n: int = Query(10000, ge=3000, le=200000),
     random_seed: int = Query(42, ge=0, le=2**31 - 1),
     min_pooled_observations: int = Query(800, ge=200, le=500000),
@@ -1991,11 +2461,13 @@ def f1_homogeneity_test(
         *,
         null_arr: np.ndarray,
         pval: float,
+        ge_count: int,
         test_mode: str,
         note: str,
         method_ko: str,
         null_sample_n: int,
     ) -> dict[str, Any]:
+        b_total = int(null_arr.size)
         return {
             "empty": False,
             "alpha": float(alpha),
@@ -2012,8 +2484,14 @@ def f1_homogeneity_test(
                 "sample_n": int(null_sample_n),
                 "var_f1_mean": float(np.mean(null_arr)),
                 "var_f1_p95": float(np.quantile(null_arr, 0.95)),
+                # 귀무 분포에서 '관측 통계량 이상'이 나온 횟수 (꼬리 개수)
+                "ge_count": int(ge_count),
+                "b_total": b_total,
             },
             "p_value": pval,
+            # p는 add-one 추정량 (b+1)/(B+1) 이라 절대 0이 되지 않음. 하한은 1/(B+1).
+            "p_value_method": "add_one_(b+1)/(B+1)",
+            "p_value_floor": float(1.0 / (b_total + 1)),
             "reject_h0": bool(pval < float(alpha)),
             "h0": "All districts share the same underlying trip distribution for (transit,bike)->F1; district labels do not matter.",
             "h0_ko": (
@@ -2034,17 +2512,19 @@ def f1_homogeneity_test(
             idx = rng.integers(0, n_gu, size=n_gu, endpoint=False)
             null_stats_fb.append(float(np.var(obs_f1[idx], ddof=0)))
         null_arr = np.array(null_stats_fb, dtype=float)
-        pval = float(np.mean(null_arr >= obs_var))
+        ge = int(np.sum(null_arr >= obs_var))
+        pval = float((ge + 1) / (null_arr.size + 1))
         return _response_common(
             null_arr=null_arr,
             pval=pval,
+            ge_count=ge,
             test_mode="bootstrap_f1_iid",
             note="Bootstrap variance under exchangeable district F1 (fallback when pooled TMAP-matched trips < min_pooled_observations).",
             method_ko=(
                 "관측: district_savings.json과 동일한 정의로 구별 Depth·Coverage→F1을 구한 뒤 Var(F1)을 씁니다. "
                 f"OD·TMAP OK로 맞춘 trip 풀 표본이 {wts_len}건으로, 경로 수준 귀무 시뮬레이션에 권장 최소({min_pool}건)에 못 미칩니다. "
                 f"대신 구별 F1 {n_gu}개를 경험분포에서 복원추출해 Var(F1)을 반복 계산하는 부트스트랩({int(mc_sims)}회)으로 "
-                "p = P(null Var ≥ 관측 Var)를 추정합니다. "
+                "p를 add-one 추정량 (b+1)/(B+1)로 계산합니다(p 하한 1/(B+1), 0 불가). "
                 "이 귀무는 ‘모든 구가 동일한 F1 분포에서 독립적으로 나왔다’에 가깝고, 경로 구조 차이는 반영하지 못하므로 탐색·보조 해석에 한정하세요."
             ),
             null_sample_n=n_gu,
@@ -2102,22 +2582,31 @@ def f1_homogeneity_test(
 
     null_stats: list[float] = []
     pool_n = int(w.shape[0])
+    # 가중 복원추출을 매 반복마다 np.random.choice(p=...)로 하면 cumsum을 매번 다시 계산해
+    # 10,000회에서 느립니다. cumsum(=cdf)을 한 번만 만들고 searchsorted로 표본을 뽑습니다.
+    cdf = np.cumsum(p)
+    cdf[-1] = 1.0  # 부동소수점 누적오차 방지(마지막 칸 보정)
     for _ in range(int(mc_sims)):
-        idx = rng.choice(pool_n, size=int(eff_n), replace=True, p=p)
+        u = rng.random(int(eff_n))
+        idx = np.searchsorted(cdf, u, side="right")
+        np.clip(idx, 0, pool_n - 1, out=idx)
         null_stats.append(_stat_from_sample(idx))
 
     null_arr = np.array(null_stats, dtype=float)
-    pval = float(np.mean(null_arr >= obs_var))
+    ge = int(np.sum(null_arr >= obs_var))
+    pval = float((ge + 1) / (null_arr.size + 1))
 
     return _response_common(
         null_arr=null_arr,
         pval=pval,
+        ge_count=ge,
         test_mode="trip_label_randomization",
         note="Monte Carlo weighted-resampling + random partitioning approximation (빈도 가중을 위해).",
         method_ko=(
             "관측: district_savings.json과 동일한 정의로 구별 Depth·Coverage→F1을 구한 뒤 Var(F1)을 씁니다. "
             "귀무: OD·TMAP OK 경로를 풀에서 가중 복원추출한 뒤, 구별 matched 가중 비율로 표본을 구에 무작위 할당해 F1을 다시 계산합니다. "
-            f"이 과정을 {int(mc_sims)}회 반복해 Var(F1)의 귀무 분포를 근사하고, p = P(null Var ≥ 관측 Var)입니다. "
+            f"이 과정을 {int(mc_sims)}회 반복해 Var(F1)의 귀무 분포를 근사하고, p는 add-one(plus-one) 추정량 (b+1)/(B+1)로 계산합니다 "
+            f"(b=귀무에서 ‘관측 Var 이상’이 나온 횟수, B={int(mc_sims)}=반복수). 유한 시뮬레이션으로 p=0을 입증할 수 없으므로 p의 하한은 1/(B+1)이며 절대 0이 되지 않습니다. "
             f"(응답 시간을 위해 MC 표본 크기는 요청값과 무관하게 최대 {eff_n}건으로 캡합니다.)"
         ),
         null_sample_n=int(eff_n),
@@ -2507,3 +2996,445 @@ def lookup_pair(
         end_lon=float(elon),
         trip_count_for_pair=trip_count,
     )
+
+
+# ───────────────────────────── 가설 2 · 수급 균형 (ANOVA) ─────────────────────────────
+
+# 순유입 H0 기각 대여소 CSV → 대여소명 기반 3집단 라벨링 후 순유입량 ANOVA
+_SUPPLY_NETFLOW_CACHE: dict[tuple[str, int], dict] = {}
+
+# 교육시설/관공서 키워드 (대여소명에 포함되면 해당 집단)
+_GOV_EDU_KEYWORDS: tuple[str, ...] = (
+    "초등학교", "중학교", "고등학교", "대학교", "대학원", "캠퍼스", "학교", "유치원", "어린이집",
+    "도서관", "구청", "시청", "군청", "주민센터", "행정복지센터", "동사무소", "파출소", "지구대",
+    "경찰서", "소방서", "우체국", "보건소", "세무서", "법원", "검찰", "교육청", "정부청사",
+    "구민회관", "복지관", "주민자치", "동주민",
+)
+
+# 지하철"역": '역' 뒤에 경계(숫자/번/출구/공백/괄호/끝/방향어 등)가 오는 경우만 매칭 (역삼동·역촌 등 오탐 방지)
+_SUBWAY_RE = __import__("re").compile(r"역(\s|\)|\(|$|[0-9]|번|출구|입구|광장|사거리|삼거리|교차로|네거리|앞|뒤)")
+
+
+def _classify_station_name(name: str) -> str:
+    s = str(name or "")
+    if _SUBWAY_RE.search(s):
+        return "subway"
+    if any(k in s for k in _GOV_EDU_KEYWORDS):
+        return "gov_edu"
+    return "other"
+
+
+_SUPPLY_GROUP_LABELS: dict[str, str] = {
+    "subway": "지하철역",
+    "gov_edu": "교육·관공서",
+    "other": "기타",
+}
+
+
+def _supply_netflow_csv_path() -> Path:
+    env = os.getenv("SUPPLY_NETFLOW_CSV")
+    if env:
+        return Path(env)
+    root = Path(__file__).resolve().parent.parent
+    return root / "data" / "rejectH0_positive_netflow_station_names.csv"
+
+
+@app.get("/api/supply-demand/anova")
+def supply_demand_anova(
+    dv: str = Query("일평균_순유입량", description="ANOVA 종속변수 컬럼명"),
+):
+    """가설 2 · 수급 균형.
+
+    순유입 H0 기각(양(+)의 순유입) 대여소들을 대여소명으로 3집단
+    (지하철역 / 교육·관공서 / 기타)으로 라벨링하고, 순유입량(기본 일평균_순유입량)에 대해
+    일원배치 ANOVA를 수행한다. 등분산 검정(Levene)과 Tukey HSD 사후검정도 함께 반환.
+    """
+    fp = _supply_netflow_csv_path()
+    if not fp.exists():
+        raise HTTPException(404, f"netflow CSV not found: {fp}")
+
+    key = (str(dv), int(fp.stat().st_mtime))
+    cached = _SUPPLY_NETFLOW_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    try:
+        df = pd.read_csv(fp)
+    except Exception as e:
+        raise HTTPException(500, f"CSV 읽기 실패: {e}")
+
+    if "대여소명" not in df.columns:
+        raise HTTPException(400, "CSV에 '대여소명' 컬럼이 없습니다.")
+    if dv not in df.columns:
+        raise HTTPException(400, f"DV 컬럼 '{dv}' 가 CSV에 없습니다. 가능한 컬럼: {list(df.columns)}")
+
+    df = df.copy()
+    df["_grp"] = df["대여소명"].apply(_classify_station_name)
+    df["_dv"] = pd.to_numeric(df[dv], errors="coerce")
+    df = df.dropna(subset=["_dv"])
+
+    order = ["subway", "gov_edu", "other"]
+    arrays: dict[str, np.ndarray] = {
+        g: df.loc[df["_grp"] == g, "_dv"].to_numpy(dtype=float) for g in order
+    }
+
+    groups_out: list[dict[str, Any]] = []
+    for g in order:
+        v = arrays[g]
+        n = int(v.size)
+        groups_out.append(
+            {
+                "key": g,
+                "label": _SUPPLY_GROUP_LABELS[g],
+                "n": n,
+                "mean": float(np.mean(v)) if n else None,
+                "std": float(np.std(v, ddof=1)) if n > 1 else None,
+                "sem": float(np.std(v, ddof=1) / np.sqrt(n)) if n > 1 else None,
+                "median": float(np.median(v)) if n else None,
+                "min": float(np.min(v)) if n else None,
+                "max": float(np.max(v)) if n else None,
+            }
+        )
+
+    valid_arrays = [arrays[g] for g in order if arrays[g].size >= 2]
+    if len(valid_arrays) < 2:
+        raise HTTPException(400, "ANOVA를 위한 유효 집단(각 n≥2)이 부족합니다.")
+
+    # one-way ANOVA
+    f_stat, p_anova = scipy_stats.f_oneway(*valid_arrays)
+    k = len(valid_arrays)
+    n_total = int(sum(a.size for a in valid_arrays))
+    df_between = k - 1
+    df_within = n_total - k
+    # eta squared = SS_between / SS_total
+    grand = np.concatenate(valid_arrays)
+    grand_mean = float(np.mean(grand))
+    ss_between = float(sum(a.size * (np.mean(a) - grand_mean) ** 2 for a in valid_arrays))
+    ss_total = float(np.sum((grand - grand_mean) ** 2))
+    eta_sq = (ss_between / ss_total) if ss_total > 0 else None
+
+    # Levene (등분산 가정 점검)
+    try:
+        lev_w, lev_p = scipy_stats.levene(*valid_arrays, center="median")
+        levene = {"W": float(lev_w), "p": float(lev_p)}
+    except Exception:
+        levene = None
+
+    # Welch's ANOVA (등분산 가정 불충족 시 권장)
+    welch = None
+    try:
+        ns = np.array([a.size for a in valid_arrays], dtype=float)
+        means = np.array([np.mean(a) for a in valid_arrays], dtype=float)
+        vars = np.array([np.var(a, ddof=1) for a in valid_arrays], dtype=float)
+        if np.all(vars > 0) and np.all(ns > 1):
+            wts = ns / vars
+            W = float(np.sum(wts))
+            xbb = float(np.sum(wts * means) / W)
+            A = float(np.sum(wts * (means - xbb) ** 2) / (k - 1))
+            lam = float(np.sum((1.0 - wts / W) ** 2 / (ns - 1.0)))
+            f_welch = A / (1.0 + (2.0 * (k - 2) / (k * k - 1.0)) * lam)
+            df2 = (k * k - 1.0) / (3.0 * lam)
+            p_welch = float(scipy_stats.f.sf(f_welch, k - 1, df2))
+            welch = {
+                "f_stat": float(f_welch),
+                "p_value": p_welch,
+                "df_between": int(k - 1),
+                "df_within": float(df2),
+                "reject_h0": bool(p_welch < 0.05),
+            }
+    except Exception:
+        welch = None
+
+    # Tukey HSD 사후검정
+    tukey_rows: list[dict[str, Any]] = []
+    try:
+        used = [g for g in order if arrays[g].size >= 2]
+        res = scipy_stats.tukey_hsd(*[arrays[g] for g in used])
+        means = {g: float(np.mean(arrays[g])) for g in used}
+        for i in range(len(used)):
+            for j in range(i + 1, len(used)):
+                gi, gj = used[i], used[j]
+                ci = res.confidence_interval()
+                tukey_rows.append(
+                    {
+                        "a": _SUPPLY_GROUP_LABELS[gi],
+                        "b": _SUPPLY_GROUP_LABELS[gj],
+                        "mean_diff": means[gi] - means[gj],
+                        "p": float(res.pvalue[i, j]),
+                        "ci_low": float(ci.low[i, j]),
+                        "ci_high": float(ci.high[i, j]),
+                        "reject": bool(res.pvalue[i, j] < 0.05),
+                    }
+                )
+    except Exception:
+        tukey_rows = []
+
+    # 분류 검증용 전체 대여소 목록
+    gu_col = "자치구" if "자치구" in df.columns else None
+    stations = [
+        {
+            "name": str(r["대여소명"]),
+            "gu": (str(r[gu_col]) if gu_col else None),
+            "group": _SUPPLY_GROUP_LABELS[str(r["_grp"])],
+            "group_key": str(r["_grp"]),
+            "netflow": float(r["_dv"]),
+        }
+        for _, r in df.iterrows()
+    ]
+
+    payload = {
+        "empty": False,
+        "dv": str(dv),
+        "n_total": int(len(df)),
+        "groups": groups_out,
+        "anova": {
+            "f_stat": float(f_stat) if np.isfinite(f_stat) else None,
+            "p_value": float(p_anova) if np.isfinite(p_anova) else None,
+            "df_between": int(df_between),
+            "df_within": int(df_within),
+            "eta_sq": eta_sq,
+            "alpha": 0.05,
+            "reject_h0": bool(np.isfinite(p_anova) and p_anova < 0.05),
+        },
+        "levene": levene,
+        "welch": welch,
+        "tukey": tukey_rows,
+        "classification": {
+            "subway_rule": "대여소명에서 '역' 뒤에 숫자/번/출구/공백/방향어 등 경계가 오면 지하철역으로 분류",
+            "gov_edu_keywords": list(_GOV_EDU_KEYWORDS),
+            "note": "우선순위: 지하철역 → 교육·관공서 → 기타. (예: '역촌파출소'는 '역' 뒤 경계가 없어 관공서로 분류)",
+        },
+        "stations": stations,
+    }
+    _SUPPLY_NETFLOW_CACHE[key] = payload
+    return payload
+
+
+# ───────────────────────── 가설 2 · 수급 균형 (Capa·유동량 4단계 분석) ─────────────────────────
+# 입력: data/supply/{station_capa.csv, station_daily_event_flow.csv, station_metrics.csv}
+#   1) Capa ↔ 일평균 유동량 상관 (Pearson/Spearman)
+#   2) 대여소별 평균 순유입량 0 검정 → +(과적)/−(고갈)/0(균형)
+#   3) Capa 부족 검정 (ITDP 회전율 기준: 시간당 대여+반납 vs Capa/4, 단측 t)
+#   4) (+/−/0) × (Capa부족 여부) = 6집단 분류
+
+_SUPPLY_ANALYSIS_CACHE: dict[tuple[int, int, int], dict] = {}
+_SUPPLY_CALENDAR_DAYS = 304  # 2025-01-01 ~ 2025-10-31
+_SUPPLY_N_DAYS = 304
+
+_NETFLOW_GROUP_ORDER = ["+_순유입/과적", "-_순유출/고갈", "0_균형(기각 안 됨)"]
+_CAPA_NOT_SHORTAGE = "Capa 부족하지 않음"
+_SIX_GROUP_ORDER: list[tuple[str, str]] = [
+    ("+_순유입/과적", "Capa 부족"),
+    ("+_순유입/과적", _CAPA_NOT_SHORTAGE),
+    ("-_순유출/고갈", "Capa 부족"),
+    ("-_순유출/고갈", _CAPA_NOT_SHORTAGE),
+    ("0_균형(기각 안 됨)", "Capa 부족"),
+    ("0_균형(기각 안 됨)", _CAPA_NOT_SHORTAGE),
+]
+_SIX_GROUP_LABELS = {
+    ("+_순유입/과적", "Capa 부족"): "01_순유입_과적__Capa부족",
+    ("+_순유입/과적", _CAPA_NOT_SHORTAGE): "02_순유입_과적__Capa부족하지않음",
+    ("-_순유출/고갈", "Capa 부족"): "03_순유출_고갈__Capa부족",
+    ("-_순유출/고갈", _CAPA_NOT_SHORTAGE): "04_순유출_고갈__Capa부족하지않음",
+    ("0_균형(기각 안 됨)", "Capa 부족"): "05_균형__Capa부족",
+    ("0_균형(기각 안 됨)", _CAPA_NOT_SHORTAGE): "06_균형__Capa부족하지않음",
+}
+
+
+def _supply_dir() -> Path:
+    return Path(__file__).resolve().parent.parent / "data" / "supply"
+
+
+def _fisher_ci(r: float, n: int, z: float = 1.959963984540054) -> tuple[Optional[float], Optional[float]]:
+    if n is None or n <= 3 or not np.isfinite(r) or abs(r) >= 1:
+        return None, None
+    zr = np.arctanh(r)
+    se = 1.0 / sqrt(n - 3)
+    return float(np.tanh(zr - z * se)), float(np.tanh(zr + z * se))
+
+
+@app.get("/api/supply/analysis")
+def supply_analysis():
+    """가설 2 · 수급 균형 통합 분석(4단계). data/supply CSV에서 매번 재계산(파일 mtime 캐시)."""
+    base = _supply_dir()
+    capa_fp = base / "station_capa.csv"
+    daily_fp = base / "station_daily_event_flow.csv"
+    metrics_fp = base / "station_metrics.csv"
+    for fp in (capa_fp, daily_fp, metrics_fp):
+        if not fp.exists():
+            raise HTTPException(404, f"supply CSV not found: {fp}")
+
+    key = (
+        int(capa_fp.stat().st_mtime),
+        int(daily_fp.stat().st_mtime),
+        int(metrics_fp.stat().st_mtime),
+    )
+    cached = _SUPPLY_ANALYSIS_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    capa = pd.read_csv(capa_fp, encoding="utf-8-sig")
+    daily = pd.read_csv(daily_fp, encoding="utf-8-sig")
+    metrics = pd.read_csv(metrics_fp, encoding="utf-8-sig")
+
+    capa["Capa"] = pd.to_numeric(capa["Capa"], errors="coerce")
+    daily["daily_event_flow"] = pd.to_numeric(daily["daily_event_flow"], errors="coerce")
+
+    # 대여소별 일평균 유동량 (이벤트 기반: |대여|+|반납| 일합, 304일 평균)
+    daily_ok = daily.dropna(subset=["daily_event_flow"])
+    station_flow = daily_ok.groupby("대여소_ID", as_index=False).agg(
+        total_event_flow=("daily_event_flow", "sum"),
+        active_days=("date", "nunique"),
+    )
+    station_flow["avg_daily_event_flow"] = station_flow["total_event_flow"] / _SUPPLY_CALENDAR_DAYS
+
+    # ── 1) Capa ↔ 일평균 유동량 상관 ──
+    merged = capa[["대여소_번호", "대여소_ID", "자치구", "Capa"]].merge(
+        station_flow[["대여소_ID", "avg_daily_event_flow"]], on="대여소_ID", how="inner"
+    )
+    merged = merged.dropna(subset=["Capa", "avg_daily_event_flow"])
+    merged = merged[(merged["Capa"] > 0) & (merged["avg_daily_event_flow"] >= 0)].copy()
+    n_corr = int(len(merged))
+    x = merged["Capa"].to_numpy(dtype=float)
+    y = merged["avg_daily_event_flow"].to_numpy(dtype=float)
+    pear = scipy_stats.pearsonr(x, y)
+    spear = scipy_stats.spearmanr(x, y)
+    p_r = float(pear[0]); p_p = float(pear[1])
+    s_r = float(spear[0]); s_p = float(spear[1])
+    p_lo, p_hi = _fisher_ci(p_r, n_corr)
+    points = [
+        {"capa": float(c), "flow": float(f), "gu": (str(g) if g == g else None)}
+        for c, f, g in zip(merged["Capa"], merged["avg_daily_event_flow"], merged["자치구"])
+    ]
+
+    # ── 2) 순유입량 0 검정 (대여소별 단일표본 t, 양측) ──
+    m = metrics.copy()
+    m["일평균_순유입량"] = pd.to_numeric(m["일평균_순유입량"], errors="coerce")
+    m["순유입량_표준편차"] = pd.to_numeric(m["순유입량_표준편차"], errors="coerce")
+    m["Capa"] = pd.to_numeric(m["Capa"], errors="coerce")
+    nf = m.dropna(subset=["일평균_순유입량", "순유입량_표준편차"]).copy()
+    se = nf["순유입량_표준편차"].to_numpy(dtype=float) / sqrt(_SUPPLY_N_DAYS)
+    mean = nf["일평균_순유입량"].to_numpy(dtype=float)
+    df_t = _SUPPLY_N_DAYS - 1
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t_stat = np.where(
+            se == 0,
+            np.where(mean > 0, np.inf, np.where(mean < 0, -np.inf, 0.0)),
+            mean / se,
+        )
+    p_two = 2.0 * scipy_stats.t.sf(np.abs(t_stat), df_t)
+    p_two = np.where(np.isinf(t_stat), 0.0, p_two)
+    reject = p_two < 0.05
+    grp = np.where(~reject, "0_균형(기각 안 됨)", np.where(mean > 0, "+_순유입/과적", np.where(mean < 0, "-_순유출/고갈", "0_균형(기각 안 됨)")))
+    nf["net_flow_group"] = grp
+    nf["_reject"] = reject
+
+    nf_groups = []
+    for g in _NETFLOW_GROUP_ORDER:
+        sub = nf[nf["net_flow_group"] == g]
+        if len(sub) == 0:
+            continue
+        nf_groups.append({
+            "key": g,
+            "count": int(len(sub)),
+            "share": float(len(sub) / len(nf)),
+            "mean_net_flow": float(sub["일평균_순유입량"].mean()),
+            "median_net_flow": float(sub["일평균_순유입량"].median()),
+            "mean_capa": float(sub["Capa"].mean()),
+        })
+
+    # ── 3) Capa 부족 검정 (시간당 유동량 vs Capa/4, 단측 t) ──
+    hourly = daily_ok.copy()
+    hourly["hourly"] = hourly["daily_event_flow"] / 24.0
+    fs = hourly.groupby("대여소_ID", as_index=False).agg(
+        total_hourly=("hourly", "sum"),
+        sumsq_hourly=("hourly", lambda s: float((s * s).sum())),
+    )
+    cap = nf[["대여소_ID", "자치구", "Capa", "net_flow_group", "일평균_순유입량"]].merge(
+        fs, on="대여소_ID", how="left"
+    )
+    cap[["total_hourly", "sumsq_hourly"]] = cap[["total_hourly", "sumsq_hourly"]].fillna(0.0)
+    cap = cap.dropna(subset=["Capa"])
+    cap = cap[cap["Capa"] > 0].copy()
+    mean_hourly = cap["total_hourly"].to_numpy(dtype=float) / _SUPPLY_N_DAYS
+    threshold = cap["Capa"].to_numpy(dtype=float) / 4.0
+    daily_ratio = mean_hourly * 24.0 / cap["Capa"].to_numpy(dtype=float)
+    numerator = cap["sumsq_hourly"].to_numpy(dtype=float) - _SUPPLY_N_DAYS * (mean_hourly ** 2)
+    sample_std = np.sqrt(np.clip(numerator, 0, None) / (_SUPPLY_N_DAYS - 1))
+    se3 = sample_std / sqrt(_SUPPLY_N_DAYS)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t3 = np.where(
+            se3 == 0,
+            np.where(mean_hourly > threshold, np.inf, np.where(mean_hourly < threshold, -np.inf, 0.0)),
+            (mean_hourly - threshold) / se3,
+        )
+    p3 = scipy_stats.t.sf(t3, _SUPPLY_N_DAYS - 1)
+    p3 = np.where(np.isposinf(t3), 0.0, np.where(np.isneginf(t3), 1.0, p3))
+    capa_issue_reject = p3 < 0.05
+    cap["mean_hourly"] = mean_hourly
+    cap["daily_ratio"] = daily_ratio
+    cap["_capa_reject"] = capa_issue_reject
+    cap["capacity_issue"] = np.where(capa_issue_reject, "Capa 부족", _CAPA_NOT_SHORTAGE)
+
+    cap_by_group = []
+    for g in _NETFLOW_GROUP_ORDER:
+        sub = cap[cap["net_flow_group"] == g]
+        if len(sub) == 0:
+            continue
+        cnt = int(len(sub))
+        issue = int(sub["_capa_reject"].sum())
+        cap_by_group.append({
+            "group": g,
+            "count": cnt,
+            "issue_count": issue,
+            "issue_share": float(issue / cnt) if cnt else None,
+            "mean_ratio": float(sub["daily_ratio"].mean()),
+            "median_ratio": float(sub["daily_ratio"].median()),
+            "mean_hourly_flow": float(sub["mean_hourly"].mean()),
+            "mean_capa": float(sub["Capa"].mean()),
+        })
+
+    # ── 4) 6집단 분류 ──
+    six = []
+    for nfg, capg in _SIX_GROUP_ORDER:
+        sub = cap[(cap["net_flow_group"] == nfg) & (cap["capacity_issue"] == capg)]
+        six.append({
+            "label": _SIX_GROUP_LABELS[(nfg, capg)],
+            "net_flow_group": nfg,
+            "capacity_group": capg,
+            "count": int(len(sub)),
+            "mean_capa": float(sub["Capa"].mean()) if len(sub) else None,
+            "median_ratio": float(sub["daily_ratio"].median()) if len(sub) else None,
+            "mean_net_flow": float(sub["일평균_순유입량"].mean()) if len(sub) else None,
+        })
+
+    payload = {
+        "empty": False,
+        "alpha": 0.05,
+        "n_days": _SUPPLY_N_DAYS,
+        "correlation": {
+            "n": n_corr,
+            "pearson_r": p_r,
+            "pearson_p": p_p,
+            "spearman_rho": s_r,
+            "spearman_p": s_p,
+            "pearson_ci95": [p_lo, p_hi],
+            "calendar_days": _SUPPLY_CALENDAR_DAYS,
+            "points": points,
+        },
+        "net_flow": {
+            "stations_n": int(len(nf)),
+            "groups": nf_groups,
+        },
+        "capacity": {
+            "threshold_def": "E(시간당 대여+반납) > Capa/4 (ITDP 일 6회 회전율의 시간 환산)",
+            "stations_n": int(len(cap)),
+            "by_group": cap_by_group,
+        },
+        "six_group": {
+            "total": int(len(cap)),
+            "groups": six,
+        },
+    }
+    _SUPPLY_ANALYSIS_CACHE[key] = payload
+    return payload

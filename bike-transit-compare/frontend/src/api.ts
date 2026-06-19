@@ -151,9 +151,22 @@ export type GuFactorRow = {
   year?: string;
 };
 
+export type SupplementalFactorStatus = {
+  factor: string;
+  file: string;
+  category?: string;
+  exists: boolean;
+  loaded: boolean;
+  rows: number;
+  path?: string;
+  error?: string;
+};
+
 export type FactorsTable = {
   empty: boolean;
   csv: string;
+  supplemental_dir?: string;
+  supplemental?: SupplementalFactorStatus[];
   rows: GuFactorRow[];
   meta?: any;
 };
@@ -185,10 +198,14 @@ export type MeanF1Stats = {
 export type FactorsAnalysis = {
   empty: boolean;
   coverage_thr_pct: number;
+  /** 따릉이 대여 소요시간(분)을 더해 재계산한 경우의 값 */
+  borrow_min?: number;
   targets_n?: number;
   factors_n?: number;
   mean_f1_stats?: MeanF1Stats | null;
   corr_rows?: FactorsCorrelationRow[];
+  /** borrow_min 적용 후 구별 F1 (slider 재계산용) */
+  f1_by_gu?: Record<string, number>;
   factor_corr?: { factors: string[]; matrix: number[][] };
   vif?: { factor: string; vif: number; r2: number }[];
   meta?: any;
@@ -201,10 +218,220 @@ export async function fetchFactorsTable(): Promise<FactorsTable> {
   return r.json();
 }
 
-export async function fetchFactorsAnalysis(coverageThrPct: number): Promise<FactorsAnalysis> {
-  const q = new URLSearchParams({ coverage_thr_pct: String(coverageThrPct) });
+export async function fetchFactorsAnalysis(
+  coverageThrPct: number,
+  borrowMin = 0
+): Promise<FactorsAnalysis> {
+  const q = new URLSearchParams({
+    coverage_thr_pct: String(coverageThrPct),
+    borrow_min: String(borrowMin),
+  });
   const r = await fetch(`/api/factors/analysis?${q}`);
   if (!r.ok) throw new Error("요인 분석 로드 실패");
+  return r.json();
+}
+
+// ── 가설 2 · 수급 균형 (ANOVA) ─────────────────────────────
+/** 가설 2 · 수급 균형 — Capa·유동량 4단계 분석 */
+export type SupplyCorrPoint = { capa: number; flow: number; gu: string | null };
+
+export type SupplyNetFlowGroup = {
+  key: string;
+  count: number;
+  share: number;
+  mean_net_flow: number;
+  median_net_flow: number;
+  mean_capa: number;
+};
+
+export type SupplyCapacityGroup = {
+  group: string;
+  count: number;
+  issue_count: number;
+  issue_share: number | null;
+  mean_ratio: number;
+  median_ratio: number;
+  mean_hourly_flow: number;
+  mean_capa: number;
+};
+
+export type SupplySixGroup = {
+  label: string;
+  net_flow_group: string;
+  capacity_group: string;
+  count: number;
+  mean_capa: number | null;
+  median_ratio: number | null;
+  mean_net_flow: number | null;
+};
+
+export type SupplyAnalysis = {
+  empty: boolean;
+  error?: string;
+  alpha: number;
+  n_days: number;
+  correlation: {
+    n: number;
+    pearson_r: number;
+    pearson_p: number;
+    spearman_rho: number;
+    spearman_p: number;
+    pearson_ci95: [number | null, number | null];
+    calendar_days: number;
+    points: SupplyCorrPoint[];
+  };
+  net_flow: {
+    stations_n: number;
+    groups: SupplyNetFlowGroup[];
+  };
+  capacity: {
+    threshold_def: string;
+    stations_n: number;
+    by_group: SupplyCapacityGroup[];
+  };
+  six_group: {
+    total: number;
+    groups: SupplySixGroup[];
+  };
+};
+
+export async function fetchSupplyAnalysis(signal?: AbortSignal): Promise<SupplyAnalysis> {
+  const r = await fetch(`/api/supply/analysis`, { signal });
+  if (!r.ok) throw new Error("수급 균형 분석 로드 실패");
+  return r.json();
+}
+
+export type NonlinearFactorModel = {
+  model_type?: string;
+  equation?: string;
+  beta0?: number;
+  beta1?: number;
+  beta2?: number;
+  r2?: number;
+  error?: string;
+};
+
+export type SimpleLinearFactorRow = {
+  factor: string;
+  label_ko?: string;
+  equation?: string;
+  beta0?: number;
+  beta1?: number;
+  beta2?: number;
+  r2?: number;
+  pearson_r?: number | null;
+  t_stat?: number | null;
+  p_value_slope?: number | null;
+  significant_at_alpha?: boolean;
+  lasso_selected?: boolean;
+  lasso_alpha?: number;
+  model_type?: string;
+  nonlinear_model?: NonlinearFactorModel;
+  recommended_equation?: string;
+  recommended_model_type?: string;
+  fit_kind?: "linear" | "quadratic";
+  model_selection_reason_ko?: string;
+  nonlinear_alternatives_ko?: string;
+  r2_linear?: number;
+  r2_quadratic?: number;
+  delta_r2_quad_vs_linear?: number;
+  linear_model?: NonlinearFactorModel;
+  analysis_path?: string;
+  interpretation_ko?: string;
+  error?: string;
+};
+
+export type F1RegressionCoefRow = {
+  term: string;
+  factor?: string | null;
+  label_ko?: string;
+  beta?: number;
+};
+
+export type F1GuPrediction = {
+  gu: string;
+  f1_actual: number;
+  f1_predicted: number;
+  residual: number;
+};
+
+export type F1MultipleRegression = {
+  n?: number;
+  predictors?: string[];
+  subset?: string;
+  equation?: string;
+  equation_ko?: string;
+  r2?: number;
+  r2_adj?: number;
+  rmse?: number | null;
+  mae?: number | null;
+  p_value_model?: number | null;
+  coefficients?: Record<string, number>;
+  coefficient_rows?: F1RegressionCoefRow[];
+  by_gu?: F1GuPrediction[];
+  error?: string;
+};
+
+export type CcaResult = {
+  n?: number;
+  canonical_correlations?: number[];
+  x_weights?: { pair: number; weights: Record<string, number> }[];
+  y_weights?: { pair: number; weights: Record<string, number> }[];
+  wilks_lambda?: number;
+  p_overall_approx?: number | null;
+  note?: string;
+  error?: string;
+};
+
+export type LinearCanoAnalysis = {
+  empty?: boolean;
+  error?: string;
+  alpha?: number;
+  associated_factors?: string[];
+  methodology?: {
+    step1_ko?: string;
+    step2_ko?: string;
+    step3_ko?: string;
+    step4_ko?: string;
+    caution_ko?: string[];
+  };
+  simple_linear?: SimpleLinearFactorRow[];
+  nonsignificant_factors?: string[];
+  significant_factors?: string[];
+  multiple_regression_f1?: F1MultipleRegression;
+  f1_regression?: {
+    recommended?: string;
+    description_ko?: string;
+    significant_only?: F1MultipleRegression;
+    all_associated?: F1MultipleRegression;
+  };
+  cca?: {
+    trigger?: string;
+    trigger_reason_ko?: string;
+    y_block_f1?: CcaResult;
+    y_block_depth_coverage_f1?: CcaResult;
+  };
+};
+
+export type FactorsLinearCanoResponse = {
+  coverage_thr_pct: number;
+  linear_cano?: LinearCanoAnalysis;
+  linear_cano_empty?: boolean;
+  error?: string;
+};
+
+export async function fetchFactorsLinearCano(
+  coverageThrPct: number,
+  alpha = 0.05
+): Promise<FactorsLinearCanoResponse> {
+  const q = new URLSearchParams({
+    coverage_thr_pct: String(coverageThrPct),
+    alpha: String(alpha),
+    abs_r_threshold: "0.2",
+    min_n: "15",
+  });
+  const r = await fetch(`/api/factors/linear-cano-analysis?${q}`);
+  if (!r.ok) throw new Error("선형·CCA 분석 로드 실패");
   return r.json();
 }
 
@@ -228,8 +455,20 @@ export type F1HomogeneityTest = {
     mean_f1?: number;
     by_gu?: F1HomogeneityByGuRow[];
   };
-  null?: { mc_sims: number; sample_n: number; var_f1_mean: number; var_f1_p95: number };
+  null?: {
+    mc_sims: number;
+    sample_n: number;
+    var_f1_mean: number;
+    var_f1_p95: number;
+    /** 귀무 분포에서 '관측 통계량 이상'이 나온 횟수(꼬리 개수) */
+    ge_count?: number;
+    b_total?: number;
+  };
   p_value?: number;
+  /** add_one_(b+1)/(B+1) */
+  p_value_method?: string;
+  /** p의 하한 = 1/(B+1) */
+  p_value_floor?: number;
   reject_h0?: boolean;
   h0?: string;
   h0_ko?: string;
@@ -250,7 +489,7 @@ export async function fetchF1HomogeneityTest(opts: {
   const q = new URLSearchParams({
     coverage_thr_pct: String(opts.coverageThrPct),
     alpha: String(opts.alpha ?? 0.05),
-    mc_sims: String(opts.mcSims ?? 250),
+    mc_sims: String(opts.mcSims ?? 10000),
     sample_n: String(opts.sampleN ?? 10000),
   });
   const to = opts.timeoutMs ?? 180_000;

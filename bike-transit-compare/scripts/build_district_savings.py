@@ -85,51 +85,49 @@ def parse_gu_name_from_filename(path: Path) -> str:
     return stem
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--od-dir", required=True, help="관내이동_시간_거리 폴더 경로")
-    ap.add_argument(
-        "--tmap-dir",
-        required=True,
-        help="tmap_by_district 폴더 경로 (XX구_tmap_pairs.csv)",
-    )
-    ap.add_argument("--out", required=True, help="출력 JSON 경로 (프론트에서 import)")
-    args = ap.parse_args()
+# (od_dir, tmap_dir, od_mtime, tmap_mtime) -> [(gu, source_csv, tmap_cache_csv, rows)]
+# rows: list of (bike_min, w, transit_or_None, pair_key)  — 대여시간 보정 없이 원본만 파싱
+_DISTRICT_ROWS_CACHE: Dict[tuple, list] = {}
 
-    od_dir = Path(args.od_dir)
-    tmap_dir = Path(args.tmap_dir)
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+def _max_mtime(dir_path: Path, pattern: str) -> int:
+    mx = 0
+    try:
+        for p in dir_path.glob(pattern):
+            try:
+                mx = max(mx, int(p.stat().st_mtime))
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return mx
+
+
+def load_district_rows(od_dir: Path, tmap_dir: Path) -> list:
+    """OD + TMAP를 한 번만 파싱(캐시). borrow와 무관한 원본 행만 적재 → 재계산이 빠르다."""
+    od_dir = Path(od_dir)
+    tmap_dir = Path(tmap_dir)
+    key = (
+        str(od_dir),
+        str(tmap_dir),
+        _max_mtime(od_dir, "*.csv"),
+        _max_mtime(tmap_dir, "*_tmap_pairs.csv"),
+    )
+    cached = _DISTRICT_ROWS_CACHE.get(key)
+    if cached is not None:
+        return cached
 
     od_files = sorted(p for p in od_dir.glob("*.csv") if p.is_file())
     if not od_files:
         raise SystemExit(f"no csv in {od_dir}")
 
-    results = []
-    total = DistrictAgg(gu="전체")
-    coverage_hist_by_gu: Dict[str, list] = {}
-    matched_weight_by_gu: Dict[str, float] = {}
-
+    per_gu: list = []
     for fp in od_files:
         gu = parse_gu_name_from_filename(fp)
         cache_path = tmap_dir / f"{gu}_tmap_pairs.csv"
         tmap = load_tmap_pairs(cache_path)
 
-        agg = DistrictAgg(gu=gu)
-        pair_seen = set()
-        pair_matched = set()
-
-        def _ratio_bin_1pct(transit_min: float, bike_min: float) -> int:
-            if transit_min <= 0:
-                return 0
-            d = (transit_min - bike_min) / transit_min * 100.0
-            if d <= 0:
-                return 0
-            if d >= 100:
-                return 100
-            # floor to 1% bins (0..100)
-            return int(d)
-
+        rows: list = []
         with open(fp, "r", encoding="utf-8", newline="") as f:
             r = csv.DictReader(f)
             if not r.fieldnames:
@@ -151,27 +149,69 @@ def main() -> int:
                     continue
                 if w <= 0:
                     continue
-
                 k = pair_key(a, b)
-                pair_seen.add(k)
+                rows.append((bike_min, w, tmap.get(k), k))
 
-                agg.total_weight += w
-                agg.bike_min_total_all += bike_min * w
+        per_gu.append((gu, fp.name, cache_path.name if cache_path.exists() else None, rows))
 
-                t = tmap.get(k)
-                if t is None:
-                    continue
+    _DISTRICT_ROWS_CACHE[key] = per_gu
+    return per_gu
 
-                pair_matched.add(k)
-                agg.matched_weight += w
-                agg.bike_min_total_matched += bike_min * w
-                agg.transit_min_total_matched += float(t) * w
-                diff = float(t) - bike_min
-                if diff > 0:
-                    agg.saved_pos_min_total += diff * w
-                agg.net_saved_min_total += diff * w
-                b = _ratio_bin_1pct(float(t), bike_min)
-                agg.coverage_hist_1pct[b] += w
+
+def build_payload(od_dir: Path, tmap_dir: Path, borrow_min: float = 0.0) -> dict:
+    """구별 Depth/Coverage/절감 payload를 생성.
+
+    borrow_min(따릉이 대여 소요시간, 분) > 0이면 따릉이 이용시간에 그만큼 더해
+    (= bike_eff = bike_min + borrow_min) 모든 절감·침투·coverage를 재계산한다.
+    borrow_min = 0이면 기존 결과와 동일하다.
+    """
+    od_dir = Path(od_dir)
+    tmap_dir = Path(tmap_dir)
+    A = float(borrow_min)
+
+    per_gu = load_district_rows(od_dir, tmap_dir)
+
+    results = []
+    total = DistrictAgg(gu="전체")
+    coverage_hist_by_gu: Dict[str, list] = {}
+    matched_weight_by_gu: Dict[str, float] = {}
+
+    def _ratio_bin_1pct(transit_min: float, bike_eff: float) -> int:
+        if transit_min <= 0:
+            return 0
+        d = (transit_min - bike_eff) / transit_min * 100.0
+        if d <= 0:
+            return 0
+        if d >= 100:
+            return 100
+        # floor to 1% bins (0..100)
+        return int(d)
+
+    for gu, source_csv, tmap_cache_csv, rows in per_gu:
+        agg = DistrictAgg(gu=gu)
+        pair_seen = set()
+        pair_matched = set()
+
+        for bike_min, w, t, k in rows:
+            bike_eff = bike_min + A
+
+            pair_seen.add(k)
+            agg.total_weight += w
+            agg.bike_min_total_all += bike_eff * w
+
+            if t is None:
+                continue
+
+            pair_matched.add(k)
+            agg.matched_weight += w
+            agg.bike_min_total_matched += bike_eff * w
+            agg.transit_min_total_matched += float(t) * w
+            diff = float(t) - bike_eff
+            if diff > 0:
+                agg.saved_pos_min_total += diff * w
+            agg.net_saved_min_total += diff * w
+            bin_idx = _ratio_bin_1pct(float(t), bike_eff)
+            agg.coverage_hist_1pct[bin_idx] += w
 
         agg.pairs_total = len(pair_seen)
         agg.pairs_matched = len(pair_matched)
@@ -198,8 +238,8 @@ def main() -> int:
                 "coverage_trip_weight_pct": round(coverage_pct, 3) if coverage_pct is not None else None,
                 "pairs_total": agg.pairs_total,
                 "pairs_matched": agg.pairs_matched,
-                "source_csv": fp.name,
-                "tmap_cache_csv": cache_path.name if cache_path.exists() else None,
+                "source_csv": source_csv,
+                "tmap_cache_csv": tmap_cache_csv,
             }
         )
 
@@ -221,13 +261,14 @@ def main() -> int:
     )
     total_coverage_pct = (total.matched_weight / total.total_weight * 100.0) if total.total_weight > 0 else None
 
-    payload = {
+    return {
         "meta": {
             "od_dir": str(od_dir),
             "tmap_dir": str(tmap_dir),
             "district_count": len(results),
-            "note": "depth_pct = sum(max(transit-bike,0)*w) / sum(transit*w) * 100 (matched-only, weighted by 빈도)",
-            "coverage_note": "coverage at threshold t = sum_w(bin>=t) / sum_w(all matched), where bin is floor(max((transit-bike)/transit*100,0))",
+            "borrow_min": round(A, 4),
+            "note": "depth_pct = sum(max(transit-(bike+borrow),0)*w) / sum(transit*w) * 100 (matched-only, weighted by 빈도)",
+            "coverage_note": "coverage at threshold t = sum_w(bin>=t) / sum_w(all matched), where bin is floor(max((transit-(bike+borrow))/transit*100,0))",
         },
         "total": {
             "gu": "전체",
@@ -244,8 +285,26 @@ def main() -> int:
         "matched_weight_by_gu": matched_weight_by_gu,
     }
 
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--od-dir", required=True, help="관내이동_시간_거리 폴더 경로")
+    ap.add_argument(
+        "--tmap-dir",
+        required=True,
+        help="tmap_by_district 폴더 경로 (XX구_tmap_pairs.csv)",
+    )
+    ap.add_argument("--out", required=True, help="출력 JSON 경로 (프론트에서 import)")
+    ap.add_argument("--borrow-min", type=float, default=0.0, help="따릉이 대여 소요시간(분) 보정값")
+    args = ap.parse_args()
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    payload = build_payload(Path(args.od_dir), Path(args.tmap_dir), float(args.borrow_min))
+
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[OK] wrote {out_path} (districts={len(results)})")
+    print(f"[OK] wrote {out_path} (districts={payload['meta']['district_count']})")
     return 0
 
 

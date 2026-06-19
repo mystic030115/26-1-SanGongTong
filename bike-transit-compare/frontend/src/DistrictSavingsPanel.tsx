@@ -223,6 +223,11 @@ export default function DistrictSavingsPanel() {
   const [geo, setGeo] = useState<SeoulGuGeoJSON | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [rebuilding, setRebuilding] = useState(false);
+  // 따릉이 대여 소요시간(분) — draft = 슬라이더 현재값, applied = '적용' 눌러 반영된 값
+  const [borrowDraft, setBorrowDraft] = useState(0.5);
+  const [borrowApplied, setBorrowApplied] = useState(0.5);
+  const [applying, setApplying] = useState(false);
+  const borrowAppliedRef = useRef(0.5);
   const [coverageThrPct, setCoverageThrPct] = useState(COVERAGE_PATH_THRESHOLD_DEFAULT_PCT);
   const [showCoverageLabels, setShowCoverageLabels] = useState(true);
   const [mapMode, setMapMode] = useState<"depth" | "coverage" | "f1">("depth");
@@ -236,13 +241,20 @@ export default function DistrictSavingsPanel() {
   const [f1Test, setF1Test] = useState<F1HomogeneityTest | null>(null);
   const [f1TestErr, setF1TestErr] = useState<string | null>(null);
 
-  const loadAll = useCallback(() => {
+  const loadAll = useCallback((borrow: number) => {
     const bust = `v=${Date.now()}`;
+    const payloadP =
+      borrow > 1e-9
+        ? fetch(`/api/district-savings/with-borrow?borrow_min=${borrow}`).then((r) => {
+            if (!r.ok) throw new Error("대여시간 보정 payload 로드 실패");
+            return r.json();
+          })
+        : fetch(`/district_savings.json?${bust}`, { cache: "no-store" }).then((r) => {
+            if (!r.ok) throw new Error("district_savings.json 로드 실패");
+            return r.json();
+          });
     return Promise.all([
-      fetch(`/district_savings.json?${bust}`, { cache: "no-store" }).then((r) => {
-        if (!r.ok) throw new Error("district_savings.json 로드 실패");
-        return r.json();
-      }),
+      payloadP,
       fetch(`/seoul_gu_simple.geojson?${bust}`, { cache: "no-store" }).then((r) => {
         if (!r.ok) throw new Error("seoul_gu_simple.geojson 로드 실패");
         return r.json();
@@ -256,12 +268,12 @@ export default function DistrictSavingsPanel() {
 
   useEffect(() => {
     let cancelled = false;
-    loadAll().catch((e) => {
+    loadAll(borrowAppliedRef.current).catch((e) => {
       if (!cancelled) setErr(String(e));
     });
-    // auto-refresh (cache grows while batch runs)
+    // auto-refresh (cache grows while batch runs) — 적용된 대여시간 기준 유지
     const t = window.setInterval(() => {
-      loadAll().catch(() => void 0);
+      loadAll(borrowAppliedRef.current).catch(() => void 0);
     }, 45_000);
     return () => {
       cancelled = true;
@@ -269,23 +281,36 @@ export default function DistrictSavingsPanel() {
     };
   }, [loadAll]);
 
-  const loadFactors = useCallback(async () => {
-    try {
-      const j = await fetchFactorsAnalysis(coverageThrPct);
-      setFactors(j);
-      setFactorsErr(j.error ? String(j.error) : null);
-    } catch (e) {
-      setFactorsErr(String(e));
-    }
-  }, [coverageThrPct]);
+  const loadFactors = useCallback(
+    async (borrow: number) => {
+      try {
+        const j = await fetchFactorsAnalysis(coverageThrPct, borrow);
+        setFactors(j);
+        setFactorsErr(j.error ? String(j.error) : null);
+      } catch (e) {
+        setFactorsErr(String(e));
+      }
+    },
+    [coverageThrPct]
+  );
 
   useEffect(() => {
-    loadFactors().catch(() => void 0);
+    loadFactors(borrowApplied).catch(() => void 0);
     const t = window.setInterval(() => {
-      loadFactors().catch(() => void 0);
+      loadFactors(borrowApplied).catch(() => void 0);
     }, 45_000);
     return () => window.clearInterval(t);
-  }, [loadFactors]);
+  }, [loadFactors, borrowApplied]);
+
+  const applyBorrow = useCallback(() => {
+    const b = borrowDraft;
+    setApplying(true);
+    setBorrowApplied(b);
+    borrowAppliedRef.current = b;
+    Promise.all([loadAll(b), loadFactors(b)])
+      .catch((e) => setErr(String(e)))
+      .finally(() => setApplying(false));
+  }, [borrowDraft, loadAll, loadFactors]);
 
   const loadFactorsTable = useCallback(async () => {
     try {
@@ -310,10 +335,10 @@ export default function DistrictSavingsPanel() {
     try {
       const j = await fetchF1HomogeneityTest({
         coverageThrPct,
-        mcSims: 220,
+        mcSims: 10000,
         sampleN: 10000,
         alpha: 0.05,
-        timeoutMs: 180_000,
+        timeoutMs: 300_000,
       });
       setF1Test(j);
       setF1TestErr(null);
@@ -342,7 +367,7 @@ export default function DistrictSavingsPanel() {
     try {
       const r = await fetch("/api/district-savings/rebuild", { method: "POST" });
       if (!r.ok) throw new Error(await r.text());
-      await loadAll();
+      await loadAll(borrowAppliedRef.current);
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -465,6 +490,51 @@ export default function DistrictSavingsPanel() {
     return m;
   }, [metricsByGu, mapMode]);
 
+  // 지도 hover 툴팁이 항상 최신값을 읽도록 ref로 보관 (onEachFeature는 최초 1회만 실행되므로)
+  const metricsByGuRef = useRef(metricsByGu);
+  metricsByGuRef.current = metricsByGu;
+  const coverageThrPctRef = useRef(coverageThrPct);
+  coverageThrPctRef.current = coverageThrPct;
+
+  // 모드 전환·borrow 적용 시 지도 위 값 라벨(마커)을 다시 그린다.
+  // (react-leaflet v4는 style만 setStyle로 갱신하고 onEachFeature는 재실행하지 않음)
+  useEffect(() => {
+    const gj = districtHeatmapGeoRef.current as unknown as L.GeoJSON | null;
+    if (!gj) return;
+    gj.eachLayer((layer: unknown) => {
+      const lyr = layer as {
+        feature?: { properties?: { name?: string } };
+        __coverageMarker?: L.Marker;
+        _map?: L.Map;
+        getBounds?: () => L.LatLngBounds;
+      };
+      const name = lyr.feature?.properties?.name;
+      if (lyr.__coverageMarker) {
+        try {
+          lyr.__coverageMarker.remove();
+        } catch {
+          /* ignore */
+        }
+        lyr.__coverageMarker = undefined;
+      }
+      const map = lyr._map;
+      const txt = name ? labelByGu.get(name) : undefined;
+      if (showCoverageLabels && map && txt) {
+        const center = lyr.getBounds?.().getCenter?.();
+        if (center) {
+          const icon = L.divIcon({
+            className: "coverage-label-icon",
+            html: `<div class="coverage-label">${txt}</div>`,
+            iconSize: undefined,
+          });
+          const mk = L.marker(center, { icon, interactive: false });
+          mk.addTo(map);
+          lyr.__coverageMarker = mk;
+        }
+      }
+    });
+  }, [labelByGu, showCoverageLabels, geo]);
+
   const chartDataWithF1 = useMemo(() => {
     const rows = (data?.districts ?? []).slice();
     // keep districts in consistent 가나다순 across the UI
@@ -502,6 +572,15 @@ export default function DistrictSavingsPanel() {
     const byCat: Record<string, string[]> = { population: [], income: [], geo: [] };
     const inferFromName = (factor: string): "population" | "income" | "geo" => {
       const s = factor.toLowerCase();
+      if (/employment|employ|고용/.test(factor) || /employment|employ/.test(s)) {
+        return "income";
+      }
+      if (/park|공원/.test(factor) || /park/.test(s)) {
+        return "geo";
+      }
+      if (/household|single_person|1인|가구/.test(factor) || /household|single_person/.test(s)) {
+        return "population";
+      }
       if (/income|소득|krw|wage|salary|earn|proxy_krw|월액|편차/.test(factor) || /income|krw|salary|wage/.test(s)) {
         return "income";
       }
@@ -639,10 +718,44 @@ export default function DistrictSavingsPanel() {
       if (f === "mountain_forest_proxy_ratio_pct") return "산/임야 비율 proxy(%)";
       if (f === "elderly_65plus_ratio_pct") return "고령화 비율(65세+, %)";
       if (f === "income_std_proxy_krw_per_month") return "소득 표준편차 proxy(원/월)";
+      if (f === "single_person_household_ratio_pct") return "1인 가구 비율(%)";
+      if (f === "employment_rate_pct") return "고용률(%)";
+      if (f === "park_area_total_m2") return "공원 면적(㎡, 합계)";
       return f;
     },
     [factorMetaByName]
   );
+
+  // 전체 요인 상관분석 표 (F1·요인 산점도 페이지와 동일 정의) — borrow 적용된 factors.corr_rows 사용
+  const correlationTableRows = useMemo(() => {
+    const seen = new Set<string>();
+    return (factors?.corr_rows ?? [])
+      .filter((r: FactorsCorrelationRow) => r.target === "f1")
+      .filter((r) => {
+        const fac = String(r.factor ?? "").trim();
+        if (!fac || seen.has(fac)) return false;
+        seen.add(fac);
+        return r.pearson_r != null && Number.isFinite(Number(r.pearson_r));
+      })
+      .map((r) => {
+        const pPear = r.pearson_p ?? null;
+        const pSpear = r.spearman_p ?? null;
+        const sigPearson = pPear != null && Number.isFinite(pPear) && pPear < 0.05;
+        const sigSpearman = pSpear != null && Number.isFinite(pSpear) && pSpear < 0.05;
+        return {
+          factor: r.factor,
+          label: factorLabelKr(r.factor),
+          n: r.n,
+          pearson_r: r.pearson_r,
+          pearson_p: pPear,
+          spearman_r: r.spearman_r ?? null,
+          spearman_p: pSpear,
+          sigPearson,
+          sigSpearman,
+        };
+      })
+      .sort((a, b) => Math.abs(Number(b.pearson_r ?? 0)) - Math.abs(Number(a.pearson_r ?? 0)));
+  }, [factors?.corr_rows, factorLabelKr]);
 
   // Map color ranges (per-mode). Using min/max makes small differences stand out.
   const mapRanges = useMemo(() => {
@@ -888,6 +1001,49 @@ export default function DistrictSavingsPanel() {
 
   return (
     <div className="panel district-root">
+      <section className="borrow-slider" aria-label="따릉이 대여 소요시간 보정">
+        <div className="borrow-slider__head">
+          <h3 className="borrow-slider__title">
+            따릉이 대여 소요시간 보정
+            {borrowApplied > 1e-9 ? (
+              <span className="borrow-slider__busy"> · 적용됨 +{borrowApplied.toFixed(2)}분</span>
+            ) : null}
+            {applying ? <span className="borrow-slider__busy"> · 계산 중…</span> : null}
+          </h3>
+          <span className="borrow-slider__value mono">+{borrowDraft.toFixed(2)}분</span>
+        </div>
+        <div className="borrow-slider__row">
+          <input
+            className="borrow-slider__range"
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={borrowDraft}
+            onChange={(e) => setBorrowDraft(Number(e.target.value))}
+            aria-label="대여 소요시간(분)"
+          />
+          <button
+            type="button"
+            className="btn btn-primary borrow-slider__apply"
+            onClick={applyBorrow}
+            disabled={applying || Math.abs(borrowDraft - borrowApplied) < 1e-9}
+          >
+            {applying ? "적용 중…" : "적용"}
+          </button>
+        </div>
+        <div className="borrow-slider__scale mono">
+          <span>0분</span>
+          <span>0.5분</span>
+          <span>1분(공식 대여신청 창)</span>
+        </div>
+        <p className="charts-meta" style={{ marginTop: 6 }}>
+          따릉이 이용시간에 <strong>대여 동작 시간(분)</strong>을 더해{" "}
+          <strong>아래 모든 결론(Depth·Coverage·F1·절감·상관)</strong>을 다시 계산합니다. 슬라이더로 값을 고르고{" "}
+          <strong>‘적용’</strong>을 누르세요. <strong>0분 = 현재 레포 기준</strong>.
+        </p>
+      </section>
+
       <section className="hypo-banner hypo-banner--static" aria-label="가설 1">
         <div className="hypo-title">
           <div className="hypo-badge">가설 1</div>
@@ -1051,6 +1207,18 @@ export default function DistrictSavingsPanel() {
                 >
                   {overallF1Ok == null ? "판정 불가" : overallF1Ok ? "충족" : "미충족"}
                 </span>
+                {factors?.mean_f1_stats?.t_stat != null &&
+                Number.isFinite(factors.mean_f1_stats.t_stat) &&
+                factors?.mean_f1_stats?.p_value_mean_gt_threshold_t != null &&
+                Number.isFinite(factors.mean_f1_stats.p_value_mean_gt_threshold_t) ? (
+                  <span
+                    className="hypo1-readout__stat mono"
+                    title={`단측 1표본 t검정 · H₀: 25구 F1 평균 = ${F1_MEANINGFUL.toFixed(2)}, H₁: 평균 > ${F1_MEANINGFUL.toFixed(2)} (구를 독립 표본으로 가정, df = ${(factors.mean_f1_stats.n_gu ?? 25) - 1})`}
+                  >
+                    검정통계량 t = {factors.mean_f1_stats.t_stat.toFixed(3)} · p ={" "}
+                    {fmtPvalue(factors.mean_f1_stats.p_value_mean_gt_threshold_t)}
+                  </span>
+                ) : null}
                 <p className="hypo1-readout__text">{overallHypo1Summary.f1Expl}</p>
               </li>
             </ul>
@@ -1214,14 +1382,15 @@ export default function DistrictSavingsPanel() {
                   }
                   const name = (feature.properties as any)?.name as string | undefined;
                   const label = name ?? "—";
-                  const mv = name ? metricsByGu.get(name) : undefined;
-                  const ratio = mv?.depth_pct ?? null;
-                  const cov = mv?.coverage_pct ?? null;
-                  const f1 = mv?.f1 ?? null;
-                  // hover tooltip (do NOT bind twice; permanent tooltip would override)
+                  // hover tooltip: read latest metrics via ref so borrow/threshold 변경이 즉시 반영됨
                   layer.bindTooltip(() => {
+                    const mv = name ? metricsByGuRef.current.get(name) : undefined;
+                    const ratio = mv?.depth_pct ?? null;
+                    const cov = mv?.coverage_pct ?? null;
+                    const f1 = mv?.f1 ?? null;
+                    const thr = coverageThrPctRef.current;
                     const depthLine = `Depth: ${ratio == null ? "—" : ratio.toFixed(1) + "%"}`;
-                    const covLine = `Coverage(≥${coverageThrPct}%): ${cov == null ? "—" : cov.toFixed(1) + "%"}`;
+                    const covLine = `Coverage(≥${thr}%): ${cov == null ? "—" : cov.toFixed(1) + "%"}`;
                     const f1Line = `F1: ${f1 == null ? "—" : f1.toFixed(3)}`;
                     return `<strong>${label}</strong><br/>${depthLine}<br/>${covLine}<br/>${f1Line}`;
                   }, { sticky: true, direction: "top", className: "district-hover-tip" } as any);
@@ -1241,23 +1410,8 @@ export default function DistrictSavingsPanel() {
                     (layer as any).closeTooltip?.();
                   });
 
-                  // coverage center label as a marker (so it doesn't override hover tooltip)
-                  const map = (layer as any)._map as L.Map | undefined;
-                  const txt = name ? labelByGu.get(name) : undefined;
-                  if (showCoverageLabels && map && txt) {
-                    const center = (layer as any).getBounds?.().getCenter?.();
-                    if (center) {
-                      const icon = L.divIcon({
-                        className: "coverage-label-icon",
-                        html: `<div class="coverage-label">${txt}</div>`,
-                        iconSize: undefined,
-                      });
-                      const mk = L.marker(center, { icon, interactive: false });
-                      mk.addTo(map);
-                      // remember marker so we can remove if GeoJSON is re-rendered
-                      (layer as any).__coverageMarker = mk;
-                    }
-                  }
+                  // 값 라벨(마커)은 별도 useEffect에서 생성/갱신한다
+                  // (모드 전환·borrow 적용 시 onEachFeature가 재실행되지 않으므로)
                 }}
               />
             )}
@@ -1519,7 +1673,8 @@ export default function DistrictSavingsPanel() {
         </div>
         <p className="charts-meta">
           <strong>소가설 1</strong>용입니다. Depth·Coverage로 만든 구별 F1만 막대로 보여 주며, 소가설 2의 요인 오버레이(빨간 선)는 넣지 않습니다. F1
-          구간별 <strong>도수 히스토그램</strong>은 소가설 2에서 봅니다.
+          구간별 <strong>도수 히스토그램</strong>은 소가설 2에서 봅니다. 연관 요인 산점도는 상단 탭{" "}
+          <strong>「F1·요인 산점도」</strong>에서 봅니다.
         </p>
       </section>
 
@@ -1564,7 +1719,8 @@ export default function DistrictSavingsPanel() {
           </div>
           <p className="hypo2-homogeneity__method">
             <strong>검정통계량</strong> <span className="mono">{f1Test?.test_stat ?? "Var(F1_gu)"}</span> — 구별 F1의 표본분산(분모 n 그대로).{" "}
-            Coverage 임계는 가설 1과 동일 <strong>{coverageThrPct}%</strong>입니다.
+            Coverage 임계는 가설 1과 동일 <strong>{coverageThrPct}%</strong>이고, 귀무분포는 Monte Carlo{" "}
+            <strong>10,000회</strong>로 고정해 추정합니다(p = P(null Var ≥ 관측 Var)).
             {f1Test?.method_ko ? (
               <>
                 {" "}
@@ -1589,7 +1745,11 @@ export default function DistrictSavingsPanel() {
               </div>
               <div className="hypo2-homogeneity__tile-sub mono">
                 {f1Test?.p_value != null && Number.isFinite(Number(f1Test.p_value))
-                  ? `p = ${Number(f1Test.p_value).toFixed(4)} · MC ${f1Test?.null?.mc_sims ?? "—"}회 · ${
+                  ? `p = ${fmtPvalue(Number(f1Test.p_value))}${
+                      f1Test?.null?.ge_count != null && f1Test?.null?.b_total != null
+                        ? ` (귀무 ≥ 관측 ${f1Test.null.ge_count}/${f1Test.null.b_total.toLocaleString()}, add-one)`
+                        : ""
+                    } · MC ${f1Test?.null?.mc_sims ?? "—"}회 · ${
                       f1Test.test_mode === "bootstrap_f1_iid" ? "구 수" : "표본"
                     } ${f1Test?.null?.sample_n ?? "—"}${f1Test.test_mode === "bootstrap_f1_iid" ? "개" : "건/회"}${
                       f1Test.test_mode ? ` · ${f1Test.test_mode}` : ""
@@ -1678,7 +1838,8 @@ export default function DistrictSavingsPanel() {
           <div className="subhypo-head">
             <div className="subhypo-badge">2단계 · 요인 데이터</div>
             <div className="subhypo-meta">
-              자치구 단위 7개 수치 지표 · Coverage 임계는 가설 1과 동일({coverageThrPct}%) · 상관·VIF는 저장된 구 요약과 동기화됩니다.
+              자치구 단위 기본 7개 + 보조 CSV 슬롯 3개(1인 가구·고용률·공원면적) · Coverage 임계는 가설 1과 동일(
+              {coverageThrPct}%) · 상관·VIF는 저장된 구 요약과 동기화됩니다.
             </div>
           </div>
           <div className="charts-meta" style={{ marginTop: 8 }}>
@@ -1710,7 +1871,46 @@ export default function DistrictSavingsPanel() {
                 <strong>소득 분산 proxy(원/월)</strong>: 시군구 공식 소득 분산이 없을 때, 평균소득에 가정 변동계수를 곱해 만든 보조 지표입니다.
                 절대값보다는 구 간 상대 비교에 적합합니다.
               </li>
+              <li>
+                <strong>1인 가구 비율(%)</strong>: 전체 가구 중 1인 가구 비중.{" "}
+                <span className="mono">data/factors/supplemental/single_person_household_ratio_pct.csv</span>
+              </li>
+              <li>
+                <strong>고용률(%)</strong>: 자료 출처 정의에 따른 구별 고용률.{" "}
+                <span className="mono">data/factors/supplemental/employment_rate_pct.csv</span>
+              </li>
+              <li>
+                <strong>공원 면적(㎡)</strong>: 구 관내 공원 면적 합계.{" "}
+                <span className="mono">data/factors/supplemental/park_area_total_m2.csv</span>
+              </li>
             </ul>
+            {(factorsTable?.supplemental?.length ?? 0) > 0 ? (
+              <div className="charts-meta" style={{ marginTop: 8 }}>
+                <strong>보조 CSV 슬롯</strong>
+                <ul className="factor-def-list">
+                  {(factorsTable?.supplemental ?? []).map((s) => (
+                    <li key={s.factor}>
+                      <span className="mono">{s.file}</span>:{" "}
+                      {s.loaded ? (
+                        <>
+                          로드됨 (<span className="mono">{s.rows}</span>행)
+                        </>
+                      ) : s.exists ? (
+                        "파일 있음 · 값 없음(헤더만)"
+                      ) : (
+                        "대기(파일에 gu,value 채우기)"
+                      )}
+                      {s.error ? (
+                        <>
+                          {" "}
+                          · <span style={{ color: "rgba(248, 113, 113, 0.95)" }}>{s.error}</span>
+                        </>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </div>
 
           <div className="subhypo-grid" style={{ marginTop: 12 }}>
@@ -2110,6 +2310,67 @@ export default function DistrictSavingsPanel() {
           </div>
         </div>
       </section>
+
+      {correlationTableRows.length > 0 ? (
+        <section className="factor-corr-summary" aria-label="요인별 상관분석 요약표">
+          <h3 className="panel-title" style={{ marginTop: 24, marginBottom: 4 }}>
+            자치구별 F1-Score 편차 — 요인 상관분석 (전체 {correlationTableRows.length}개)
+          </h3>
+          <p className="charts-meta">
+            대상 = 자치구 F1 (n={correlationTableRows[0]?.n ?? "—"})
+            {borrowApplied > 1e-9 ? <>, 대여시간 +{borrowApplied.toFixed(2)}분 적용</> : null}. 상관계수 가설검정{" "}
+            <span className="mono">H₀: 상관=0</span> 양측, <strong>p &lt; 0.05면 유의</strong>. Pearson r = 선형 상관,
+            Spearman ρ = 순위(단조) 상관.
+          </p>
+          <div className="geo-table-wrap" style={{ marginTop: 10 }}>
+            <table className="geo-table">
+              <thead>
+                <tr>
+                  <th>변수</th>
+                  <th className="num">Pearson r</th>
+                  <th className="num">p (Pearson)</th>
+                  <th className="num">Spearman ρ</th>
+                  <th className="num">p (Spearman)</th>
+                  <th>유의성 (α=0.05)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {correlationTableRows.map((row) => {
+                  const verdict =
+                    row.sigPearson && row.sigSpearman
+                      ? { text: "유의 (둘 다)", color: "rgba(248, 113, 113, 0.95)" }
+                      : row.sigPearson
+                        ? { text: "Pearson만 유의", color: "rgba(251, 191, 36, 0.95)" }
+                        : row.sigSpearman
+                          ? { text: "Spearman만 유의", color: "rgba(251, 191, 36, 0.95)" }
+                          : { text: "유의하지 않음", color: "rgba(148, 163, 184, 0.85)" };
+                  return (
+                    <tr key={row.factor}>
+                      <td className="label">{row.label}</td>
+                      <td className="num mono">
+                        {row.pearson_r == null ? "—" : Number(row.pearson_r).toFixed(3)}
+                      </td>
+                      <td className="num mono">{fmtPvalue(row.pearson_p)}</td>
+                      <td className="num mono">
+                        {row.spearman_r == null ? "—" : Number(row.spearman_r).toFixed(3)}
+                      </td>
+                      <td className="num mono">{fmtPvalue(row.spearman_p)}</td>
+                      <td className="label" style={{ color: verdict.color, fontWeight: 600 }}>
+                        {verdict.text}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p className="charts-meta" style={{ marginTop: 8, fontSize: "0.78rem" }}>
+            p-value는 <span className="mono">scipy.stats.pearsonr</span> ·{" "}
+            <span className="mono">spearmanr</span>의 양측검정 값입니다. 대여시간 슬라이더를 ‘적용’하면 F1이 바뀌며 이 표도
+            함께 재계산됩니다.
+          </p>
+        </section>
+      ) : null}
     </div>
   );
 }

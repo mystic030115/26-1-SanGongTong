@@ -569,6 +569,14 @@ details.hypo-banner[open] > summary {
   color: rgba(200, 210, 228, 0.92);
 }
 
+.hypo1-readout__stat {
+  margin-left: 0.5rem;
+  font-size: 0.78rem;
+  color: rgba(190, 205, 230, 0.85);
+  white-space: nowrap;
+  cursor: help;
+}
+
 .hypo1-threshold-rationale {
   margin-top: 0.85rem;
   border-radius: 12px;
@@ -618,6 +626,388 @@ details.hypo-banner[open] > summary {
 
 .hypo1-threshold-rationale__para:last-child {
   margin-bottom: 0;
+}
+
+.factor-scatter-root {
+  margin-top: 0.5rem;
+}
+
+.factor-scatter-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+  align-items: flex-end;
+  margin: 0.75rem 0 1rem;
+}
+
+.factor-scatter-toolbar label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.factor-scatter-toolbar input {
+  width: 5rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.factor-scatter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+  gap: 1rem;
+}
+
+.factor-scatter-card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 0.85rem 0.9rem 1rem;
+  background: color-mix(in srgb, var(--surface) 92%, #0b1220);
+}
+
+.factor-scatter-card__head {
+  margin-bottom: 0.5rem;
+}
+
+.factor-scatter-card__title {
+  margin: 0 0 0.25rem;
+  font-size: 1rem;
+  font-weight: 700;
+  color: color-mix(in srgb, var(--text) 92%, #cfe7ff);
+}
+
+.factor-scatter-card__meta {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.factor-scatter-card__eq {
+  margin: 0.45rem 0 0.35rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.factor-scatter-card__eq--linear {
+  color: rgba(252, 165, 165, 0.98);
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.22);
+}
+
+.factor-scatter-card__eq--ref {
+  color: rgba(203, 213, 225, 0.92);
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.factor-scatter-card__eq--quad {
+  color: rgba(196, 181, 253, 0.98);
+  background: rgba(167, 139, 250, 0.08);
+  border: 1px solid rgba(167, 139, 250, 0.22);
+}
+
+.factor-model-selection {
+  margin: 1rem 0 0.75rem;
+}
+
+.factor-equations-panel {
+  margin: 1rem 0 1.25rem;
+  padding: 0.85rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.factor-equations-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.factor-equation-card {
+  padding: 0.7rem 0.8rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 90%, #0b1220);
+}
+
+.factor-equation-card--sig {
+  border-color: rgba(248, 113, 113, 0.3);
+}
+
+.factor-equation-card--nonsig {
+  border-color: rgba(251, 191, 36, 0.28);
+}
+
+.factor-equation-card__title {
+  margin: 0 0 0.35rem;
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.factor-equation-card__eq {
+  margin: 0;
+  font-size: 0.76rem;
+  line-height: 1.4;
+  color: rgba(252, 165, 165, 0.95);
+}
+
+.factor-equation-card__slope {
+  margin: 0.35rem 0 0;
+  font-size: 1.05rem;
+  font-weight: 800;
+  color: rgba(252, 165, 165, 0.98);
+  letter-spacing: 0.02em;
+}
+
+.borrow-slider {
+  margin: 0 0 16px;
+  padding: 14px 16px;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.55), rgba(15, 23, 42, 0.5));
+}
+
+.borrow-slider__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.borrow-slider__title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #dbe4f0;
+}
+
+.borrow-slider__value {
+  font-size: 1.2rem;
+  font-weight: 800;
+  color: rgba(147, 197, 253, 0.98);
+}
+
+.borrow-slider__busy {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: rgba(251, 191, 36, 0.95);
+}
+
+.borrow-slider__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 10px 0 4px;
+}
+
+.borrow-slider__range {
+  flex: 1 1 auto;
+  width: 100%;
+  accent-color: #60a5fa;
+  cursor: pointer;
+}
+
+.borrow-slider__apply {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.borrow-slider__scale {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.72rem;
+  color: rgba(148, 163, 184, 0.85);
+}
+
+.factor-scatter-slope-badge {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 4;
+  padding: 0.45rem 0.65rem;
+  border-radius: 10px;
+  background: rgba(30, 20, 24, 0.88);
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 1.15rem;
+  font-weight: 800;
+  line-height: 1.2;
+  color: rgba(252, 165, 165, 0.98);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+
+.factor-equation-card--nonsig .factor-equation-card__eq {
+  color: rgba(203, 213, 225, 0.9);
+}
+
+.factor-equation-card__eq2 {
+  margin: 0.4rem 0 0;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  color: rgba(196, 181, 253, 0.92);
+}
+
+.factor-equation-card__meta {
+  margin: 0.35rem 0 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.5rem;
+  align-items: center;
+}
+
+.factor-equation-card__badge {
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+}
+
+.factor-equation-card__badge--sig {
+  color: rgba(248, 113, 113, 0.95);
+  background: rgba(248, 113, 113, 0.12);
+}
+
+.factor-equation-card__badge--nonsig {
+  color: rgba(251, 191, 36, 0.95);
+  background: rgba(251, 191, 36, 0.1);
+}
+
+.factor-scatter-chart-wrap {
+  position: relative;
+  overflow: visible;
+  display: block;
+  flex-shrink: 0;
+}
+
+.factor-scatter-chart-wrap .recharts-wrapper,
+.factor-scatter-chart-wrap .recharts-surface {
+  overflow: visible !important;
+}
+
+.factor-f1-regression-hero {
+  margin: 16px 0 20px;
+  padding: 14px 16px;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: 10px;
+  background: rgba(30, 24, 28, 0.55);
+}
+
+.factor-f1-regression-hero__eq {
+  margin: 10px 0 6px;
+  font-size: 0.92rem;
+  line-height: 1.55;
+  color: rgba(252, 165, 165, 0.98);
+  word-break: break-word;
+}
+
+.factor-scatter-section {
+  margin-top: 20px;
+}
+
+.factor-scatter-section__title {
+  margin: 0 0 12px;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #e2e8f0;
+}
+
+.factor-scatter-grid--parity {
+  max-width: 460px;
+}
+
+.factor-scatter-card--linear {
+  border-color: rgba(248, 113, 113, 0.25);
+}
+
+.factor-scatter-card--nonlinear {
+  border-color: rgba(251, 191, 36, 0.28);
+}
+
+.factor-scatter-card--parity {
+  border-color: rgba(74, 222, 128, 0.28);
+}
+
+.factor-scatter-caveats {
+  margin: 0.75rem 0 1rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, #fbbf24);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 88%, #1a1408);
+}
+
+.factor-scatter-caveats summary {
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: color-mix(in srgb, var(--text) 90%, #fde68a);
+}
+
+.factor-scatter-caveats__list {
+  margin: 0.55rem 0 0;
+  padding-left: 1.15rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.factor-scatter-caveats__list--factors {
+  margin-top: 0.65rem;
+}
+
+.factor-linear-cano-section {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.factor-linear-cano-steps {
+  margin: 0.5rem 0 0.75rem;
+  padding-left: 1.2rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.factor-cca-block {
+  margin-top: 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface) 90%, #0f172a);
+  border: 1px solid var(--border);
+}
+
+.factor-cca-block__title {
+  margin: 0 0 0.35rem;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.factor-nonlinearity-guide {
+  margin-top: 1rem;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid color-mix(in srgb, #fbbf24 35%, var(--border));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 88%, #1a1408);
+}
+
+.factor-nonlinearity-guide summary {
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 0.92rem;
+  color: color-mix(in srgb, var(--text) 88%, #fde68a);
 }
 
 /* 소가설 2 · 1단계 F1 동질성 검정 */
