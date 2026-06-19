@@ -62,13 +62,20 @@ export default function SupplyDemandPanel() {
   const load = useCallback(async () => {
     setLoading(true);
     setErr(null);
+    const ac = new AbortController();
+    const timer = window.setTimeout(() => ac.abort(), 60_000);
     try {
-      const j = await fetchSupplyAnalysis();
+      const j = await fetchSupplyAnalysis(ac.signal);
       setData(j);
     } catch (e) {
-      setErr(String(e));
+      const msg =
+        ac.signal.aborted
+          ? "분석 로드 시간 초과(60초). API가 다른 계산 중이면 잠시 후 다시 시도하세요."
+          : String(e);
+      setErr(msg);
       setData(null);
     } finally {
+      window.clearTimeout(timer);
       setLoading(false);
     }
   }, []);
@@ -120,8 +127,19 @@ export default function SupplyDemandPanel() {
         </div>
       </section>
 
-      {loading ? <p className="charts-meta">불러오는 중…</p> : null}
-      {err ? <p className="err">분석 로드 오류: {err}</p> : null}
+      {loading ? (
+        <p className="charts-meta">
+          불러오는 중… (가설 1 재계산과 겹치면 최대 1분 정도 걸릴 수 있습니다)
+        </p>
+      ) : null}
+      {err ? (
+        <p className="err">
+          분석 로드 오류: {err}{" "}
+          <button type="button" className="btn btn-ghost" onClick={() => void load()}>
+            다시 시도
+          </button>
+        </p>
+      ) : null}
 
       {data && !data.empty ? (
         <>

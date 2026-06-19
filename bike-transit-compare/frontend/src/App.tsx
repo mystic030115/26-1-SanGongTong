@@ -61,21 +61,17 @@ export default function App() {
         </button>
       </nav>
 
-      {tab === "hypo1" ? (
-        <PanelErrorBoundary label="가설 1 · Depth/Coverage">
-          <div className="panel charts-panel-wrap">
-            <DistrictSavingsPanel />
-          </div>
-        </PanelErrorBoundary>
-      ) : null}
+      <PanelErrorBoundary label="가설 1 · Depth/Coverage">
+        <div className="panel charts-panel-wrap" hidden={tab !== "hypo1"}>
+          <DistrictSavingsPanel />
+        </div>
+      </PanelErrorBoundary>
 
-      {tab === "hypo2" ? (
-        <PanelErrorBoundary label="가설 2 · 수급 균형">
-          <div className="panel charts-panel-wrap">
-            <SupplyDemandPanel />
-          </div>
-        </PanelErrorBoundary>
-      ) : null}
+      <PanelErrorBoundary label="가설 2 · 수급 균형">
+        <div className="panel charts-panel-wrap" hidden={tab !== "hypo2"}>
+          <SupplyDemandPanel />
+        </div>
+      </PanelErrorBoundary>
     </div>
   );
 }

@@ -93,6 +93,17 @@ const MAP_MASK_OUTER_RING: [number, number][] = [
   [-180, -90],
 ];
 
+function fmtPctOrLoading(v: number | null | undefined, loading: boolean): string {
+  if (loading && (v == null || !Number.isFinite(v))) return "계산 중…";
+  return fmtPct(v);
+}
+
+function fmtF1OrLoading(v: number | null | undefined, loading: boolean): string {
+  if (loading && (v == null || !Number.isFinite(v))) return "계산 중…";
+  if (v == null || !Number.isFinite(v)) return "—";
+  return v.toFixed(3);
+}
+
 function fmtPct(v: number | null | undefined): string {
   if (v == null || Number.isNaN(v)) return "—";
   return `${v.toFixed(1)}%`;
@@ -228,6 +239,7 @@ export default function DistrictSavingsPanel() {
   const [borrowApplied, setBorrowApplied] = useState(0.5);
   const [applying, setApplying] = useState(false);
   const borrowAppliedRef = useRef(0.5);
+  const [dataLoading, setDataLoading] = useState(true);
   const [coverageThrPct, setCoverageThrPct] = useState(COVERAGE_PATH_THRESHOLD_DEFAULT_PCT);
   const [showCoverageLabels, setShowCoverageLabels] = useState(true);
   const [mapMode, setMapMode] = useState<"depth" | "coverage" | "f1">("depth");
@@ -242,6 +254,7 @@ export default function DistrictSavingsPanel() {
   const [f1TestErr, setF1TestErr] = useState<string | null>(null);
 
   const loadAll = useCallback((borrow: number) => {
+    setDataLoading(true);
     const bust = `v=${Date.now()}`;
     const payloadP =
       borrow > 1e-9
@@ -263,7 +276,7 @@ export default function DistrictSavingsPanel() {
       setData(payload as SavingsPayload);
       setGeo(gj as SeoulGuGeoJSON);
       setErr(null);
-    });
+    }).finally(() => setDataLoading(false));
   }, []);
 
   useEffect(() => {
@@ -1066,13 +1079,15 @@ export default function DistrictSavingsPanel() {
           <div className="subhypo-grid">
             <div className="mini-banner">
               <div className="mini-label">Depth</div>
-              <div className="mini-value highlight">{fmtPct(avg)}</div>
+              <div className={`mini-value${avg != null && Number.isFinite(avg) ? " highlight" : ""}`}>
+                {fmtPctOrLoading(avg, dataLoading)}
+              </div>
               <div className="mini-sub">전체 평균 절약률(%) · 빈도 가중</div>
             </div>
 
             <div className="mini-banner">
               <div className="mini-label">Coverage</div>
-              <div className="mini-value">{fmtPct(coverageAvg)}</div>
+              <div className="mini-value">{fmtPctOrLoading(coverageAvg, dataLoading)}</div>
               <div className="mini-sub">
                 절약률 임계 {coverageThrPct}%로 정의한 경로 비율(구 평균). 전역 판정 Coverage는 ≥{COVERAGE_MEANINGFUL_AVG_PCT}%
               </div>
@@ -1081,7 +1096,7 @@ export default function DistrictSavingsPanel() {
             <div className="mini-banner" style={{ borderLeft: overallF1VerdictBorder, paddingLeft: 10 }}>
               <div className="mini-label">F1 Score</div>
               <div className={`mini-value${overallF1Ok === true ? " highlight" : ""}`}>
-                {f1Avg == null || !Number.isFinite(f1Avg) ? "—" : f1Avg.toFixed(3)}
+                {fmtF1OrLoading(f1Avg, dataLoading)}
               </div>
               <div className="mini-sub">
                 25개 구 F1 산술평균 · 가설 1 기준 ≥{F1_MEANINGFUL.toFixed(2)} · Depth×Coverage 조화
@@ -1288,6 +1303,11 @@ export default function DistrictSavingsPanel() {
       </section>
 
       {err && <p className="err">{err}</p>}
+      {dataLoading && !err ? (
+        <p className="charts-meta" style={{ marginTop: 8 }}>
+          대여 +{borrowApplied.toFixed(2)}분 기준으로 재계산 중… (최초 1~2분, 이후 캐시로 빠름)
+        </p>
+      ) : null}
 
       <section className="district-section district-map">
         <div className="district-section-head">

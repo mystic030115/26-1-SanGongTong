@@ -1107,6 +1107,41 @@ def district_savings_with_borrow(
     return payload
 
 
+def _warmup_district_savings_borrow(borrow_min: float = 0.5) -> None:
+    """기본 슬라이더(+0.5분)용 payload를 백그라운드에서 미리 계산해 첫 화면 로딩을 줄인다."""
+    root = Path(__file__).resolve().parent.parent
+    od_dir = Path(os.getenv("OD_DISTRICT_DIR") or _default_od_dir())
+    tmap_dir = root / "data" / "cache" / "tmap_by_district"
+    if not od_dir.exists() or not tmap_dir.exists():
+        return
+    key = (
+        int(round(float(borrow_min) * 100)),
+        _max_mtime_glob(od_dir, "*.csv"),
+        _max_mtime_glob(tmap_dir, "*_tmap_pairs.csv"),
+    )
+    if key in _DISTRICT_SAVINGS_BORROW_CACHE:
+        return
+    from scripts.build_district_savings import build_payload as _build_payload  # type: ignore
+
+    try:
+        _DISTRICT_SAVINGS_BORROW_CACHE[key] = _build_payload(od_dir, tmap_dir, float(borrow_min))
+    except Exception:
+        pass
+
+
+@app.on_event("startup")
+def _startup_warmup_default_borrow() -> None:
+    threading.Thread(target=_warmup_district_savings_borrow, args=(0.5,), daemon=True).start()
+    threading.Thread(target=_warmup_supply_analysis, daemon=True).start()
+
+
+def _warmup_supply_analysis() -> None:
+    try:
+        supply_analysis()
+    except Exception:
+        pass
+
+
 @app.get("/api/diagnostics/transit-last")
 def diagnostics_transit_last(
     limit: int = Query(10, ge=1, le=100),
